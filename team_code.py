@@ -10,10 +10,12 @@
 ################################################################################
 
 from helper_code import *
+from evaluate_model import *
 import numpy as np, os, sys
 import mne
 from sklearn.impute import SimpleImputer
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor'
+from sklearn.model_selection import StratifiedKFold'
 import joblib
 
 ################################################################################
@@ -130,6 +132,115 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 # Optional functions. You can change or remove these functions and/or add new functions.
 #
 ################################################################################
+
+
+def cross_validate_model(data_folder, num_folds, verbose):
+    # Find data files.
+    if verbose >= 1:
+        print('Finding the Challenge data...')
+
+    patient_ids = find_data_folders(data_folder)
+    num_patients = len(patient_ids)
+
+    if num_patients==0:
+        raise FileNotFoundError('No data was provided.')
+
+    # Create a folder for the model if it does not already exist.
+    #os.makedirs(model_folder, exist_ok=True)
+
+    # Extract the features and labels.
+    if verbose >= 1:
+        print('Extracting features and labels from the Challenge data...')
+
+    features = list()
+    outcomes = list()
+    cpcs = list()
+
+    for i in range(num_patients):
+        if verbose >= 2:
+            print('    {}/{}...'.format(i+1, num_patients))
+
+        # Load data.
+        patient_id = patient_ids[i]
+        patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
+
+        # Extract features.
+        current_features = get_features(patient_metadata, recording_metadata, recording_data)
+        features.append(current_features)
+
+        # Extract labels.
+        current_outcome = get_outcome(patient_metadata)
+        outcomes.append(current_outcome)
+        current_cpc = get_cpc(patient_metadata)
+        cpcs.append(current_cpc)
+
+    features = np.vstack(features)
+    outcomes = np.vstack(outcomes)
+    cpcs = np.vstack(cpcs)
+
+    # Make CV folds
+    if verbose >= 1:
+        print('Split the data into {} cross-validation folds'.format(num_folds))
+    
+    skf = StratifiedKFold(n_splits=num_folds, random_state=None, shuffle=False)
+
+    # Train the models.
+    if verbose >= 1:
+        print('Training the Challenge models on the Challenge data...')
+        # Define parameters for random forest classifier and regressor.
+    n_estimators   = 123  # Number of trees in the forest.
+    max_leaf_nodes = 456  # Maximum number of leaf nodes in each tree.
+    random_state   = 789  # Random state; set for reproducibility.
+
+
+    challenge_score = np.zeros(num_folds)
+    auroc_outcomes = np.zeros(num_folds)
+    auprc_outcomes = np.zeros(num_folds)
+    accuracy_outcomes = np.zeros(num_folds)
+    f_measure_outcomes = np.zeros(num_folds)
+    mse_cpcs = np.zeros(num_folds)
+    mae_cpcs = np.zeros(num_folds)
+
+    for i, (train_index, test_index) in enumerate(skf.split(features, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
+        print(f"Fold {i}:")
+        print(f"  Train: index={train_index}")
+        print(f"  Test:  index={test_index}")
+
+        X_train, X_test = features[train_index], features[test_index]
+        outcomes_train, outcomes_test = outcomes[train_index], outcomes[test_index]
+        cpcs_train, cpcs_test = cpcs[train_index], cpcs[test_index]
+
+        # Impute any missing features; use the mean value by default.
+        imputer = SimpleImputer().fit(X_train)
+
+        # Train the models.
+        X_train = imputer.transform(X_train)
+        outcome_model = RandomForestClassifier(
+            n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, outcomes_train.ravel())
+        cpc_model = RandomForestRegressor(
+            n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, cpcs_train.ravel())
+
+        # Apply model on test fold
+        # Impute missing data.
+        X_test = imputer.transform(X_test)
+
+        # Apply models to features.
+        outcome_hat = outcome_model.predict(X_test)[0]
+        outcome_hat_probability = outcome_model.predict_proba(X_test)[0, 1]
+        cpc_hat = cpc_model.predict(X_test)[0]
+
+        # Ensure that the CPC score is between (or equal to) 1 and 5.
+        cpc_hat = np.clip(cpc_hat, 1, 5)
+
+        challenge_score[i] = compute_challenge_score(outcomes_test,outcome_hat_probability)
+        auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_test,outcome_hat_probability)
+        accuracy_outcomes[i] = compute_accuracy(outcomes_test, outcome_hat)
+        f_measure_outcomes[i] = compute_f_measure(outcomes_test, outcome_hat)
+        mse_cpcs[i] = compute_mse(cpcs_test, cpc_hat)
+        mae_cpcs[i] = compute_mae(cpcs_test, cpc_hat)
+    
+    return challenge_score, auroc_outcomes, auprc_outcomes, accuracy_outcomes, f_measure_outcomes, mse_cpcs, mae_cpcs
+ 
 
 # Save your trained model.
 def save_challenge_model(model_folder, imputer, outcome_model, cpc_model):
