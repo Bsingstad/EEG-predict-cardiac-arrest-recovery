@@ -235,8 +235,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
         challenge_score[i] = compute_challenge_score(outcomes_test,outcome_hat_probability)
         auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_test,outcome_hat_probability)
-        accuracy_outcomes[i] = compute_accuracy(outcomes_test, outcome_hat)
-        f_measure_outcomes[i] = compute_f_measure(outcomes_test, outcome_hat)
+        accuracy_outcomes[i], _, _  = compute_accuracy(outcomes_test, outcome_hat)
+        f_measure_outcomes[i], _, _  = compute_f_measure(outcomes_test, outcome_hat)
         mse_cpcs[i] = compute_mse(cpcs_test, cpc_hat)
         mae_cpcs[i] = compute_mae(cpcs_test, cpc_hat)
     
