@@ -202,9 +202,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
     mae_cpcs = np.zeros(num_folds)
 
     for i, (train_index, test_index) in enumerate(skf.split(features, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
-        print(f"Fold {i}:")
-        print(f"  Train: index={train_index}")
-        print(f"  Test:  index={test_index}")
+        print(f" Running CV fold {i+1} of {num_folds}")
 
         X_train, X_test = features[train_index], features[test_index]
         outcomes_train, outcomes_test = outcomes[train_index], outcomes[test_index]
