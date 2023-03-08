@@ -202,7 +202,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
     mae_cpcs = np.zeros(num_folds)
 
     for i, (train_index, test_index) in enumerate(skf.split(features, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
-        print(f" Running CV fold {i+1} of {num_folds}")
+        print(f"Fold {i}:")
 
         X_train, X_test = features[train_index], features[test_index]
         outcomes_train, outcomes_test = outcomes[train_index], outcomes[test_index]
@@ -223,9 +223,12 @@ def cross_validate_model(data_folder, num_folds, verbose):
         X_test = imputer.transform(X_test)
 
         # Apply models to features.
-        outcome_hat = outcome_model.predict(X_test)[0]
-        outcome_hat_probability = outcome_model.predict_proba(X_test)[0, 1]
-        cpc_hat = cpc_model.predict(X_test)[0]
+        outcome_hat = np.expand_dims(outcome_model.predict(X_test),1)
+        #print(f"outcome shape = {outcome_hat.shape}")
+        outcome_hat_probability = np.expand_dims(outcome_model.predict_proba(X_test)[:,0],1)
+        #print(f"outcome_hat_probability shape = {outcome_hat_probability.shape}")
+        cpc_hat = np.expand_dims(cpc_model.predict(X_test),1)
+        #print(f"cpc_hat shape = {cpc_hat.shape}")
 
         # Ensure that the CPC score is between (or equal to) 1 and 5.
         cpc_hat = np.clip(cpc_hat, 1, 5)
