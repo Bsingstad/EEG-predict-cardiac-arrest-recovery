@@ -15,7 +15,7 @@ import numpy as np, os, sys
 import mne
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.model_selection import StratifiedKFold'
+from sklearn.model_selection import StratifiedKFold
 import joblib
 
 ################################################################################
