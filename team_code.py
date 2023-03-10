@@ -141,8 +141,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
     TASK = 3
     SIGNAL_LEN = 30 # in seconds
-    BATCH_SIZE = 2
-    EPOCHS = 2
+    BATCH_SIZE = 20
+    EPOCHS = 30
 
     if verbose >= 1:
         print('Finding the Challenge data...')
