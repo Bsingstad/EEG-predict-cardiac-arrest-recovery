@@ -12,11 +12,14 @@
 from helper_code import *
 from evaluate_model import *
 import numpy as np, os, sys
+import pandas as pd
+from io import StringIO
 import mne
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import StratifiedKFold
 import joblib
+import tensorflow as tf
 
 ################################################################################
 #
@@ -136,6 +139,11 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 
 def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
+    TASK = 3
+    SIGNAL_LEN = 30 # in seconds
+    BATCH_SIZE = 2
+    EPOCHS = 2
+
     if verbose >= 1:
         print('Finding the Challenge data...')
 
@@ -152,7 +160,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
     if verbose >= 1:
         print('Extracting features and labels from the Challenge data...')
 
-    features = list()
+    #features = list()
+    signals = list()
     outcomes = list()
     cpcs = list()
 
@@ -165,8 +174,12 @@ def cross_validate_model(data_folder, num_folds, verbose):
         patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
 
         # Extract features.
-        current_features = get_features(patient_metadata, recording_metadata, recording_data)
-        features.append(current_features)
+        current_signal = extract_signal(recording_metadata,recording_data, task=TASK,time=SIGNAL_LEN)
+        signals.append(current_signal)
+        
+
+        #current_features = get_features(patient_metadata, recording_metadata, recording_data)
+        #features.append(current_features)
 
         # Extract labels.
         current_outcome = get_outcome(patient_metadata)
@@ -174,7 +187,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
         current_cpc = get_cpc(patient_metadata)
         cpcs.append(current_cpc)
 
-    features = np.vstack(features)
+    #features = np.vstack(features)
+    signals = np.moveaxis(np.asarray(signals),1,-1)
     outcomes = np.vstack(outcomes)
     cpcs = np.vstack(cpcs)
 
@@ -201,33 +215,65 @@ def cross_validate_model(data_folder, num_folds, verbose):
     mse_cpcs = np.zeros(num_folds)
     mae_cpcs = np.zeros(num_folds)
 
-    for i, (train_index, test_index) in enumerate(skf.split(features, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
+    for i, (train_index, test_index) in enumerate(skf.split(signals, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
         print(f"Fold {i}:")
 
-        X_train, X_test = features[train_index], features[test_index]
+        X_train, X_test = signals[train_index], signals[test_index]
         outcomes_train, outcomes_test = outcomes[train_index], outcomes[test_index]
         cpcs_train, cpcs_test = cpcs[train_index], cpcs[test_index]
 
         # Impute any missing features; use the mean value by default.
-        imputer = SimpleImputer().fit(X_train)
+        #imputer = SimpleImputer().fit(X_train)
 
         # Train the models.
-        X_train = imputer.transform(X_train)
-        outcome_model = RandomForestClassifier(
-            n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, outcomes_train.ravel())
-        cpc_model = RandomForestRegressor(
-            n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, cpcs_train.ravel())
+        #X_train = imputer.transform(X_train)
+        outcome_model = build_iception_model(signals.shape[1:], outcomes.shape[1], outputfunc="sigmoid",loss=tf.keras.losses.BinaryCrossentropy())
+        #outcome_model = RandomForestClassifier(
+        #    n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, outcomes_train.ravel())
+        cpc_model = build_iception_model(signals.shape[1:], cpcs.shape[1], outputfunc="linear",loss=tf.keras.losses.MeanSquaredError())
+        #cpc_model = RandomForestRegressor(
+        #    n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, cpcs_train.ravel())
+
+        tf_cpcs_train = tf.data.Dataset.from_tensor_slices((X_train, cpcs_train)) 
+        tf_cpcs_train = tf_cpcs_train.cache()
+        tf_cpcs_train = tf_cpcs_train.batch(BATCH_SIZE)
+        tf_cpcs_train = tf_cpcs_train.prefetch(tf.data.AUTOTUNE)
+
+        tf_cpcs_val = tf.data.Dataset.from_tensor_slices((X_test, cpcs_test))
+        tf_cpcs_val = tf_cpcs_val.cache()
+        tf_cpcs_val = tf_cpcs_val.batch(BATCH_SIZE)
+        tf_cpcs_val = tf_cpcs_val.prefetch(tf.data.AUTOTUNE)
+
+        tf_outcome_train = tf.data.Dataset.from_tensor_slices((X_train, outcomes_train))  
+        tf_outcome_train = tf_outcome_train.cache()
+        tf_outcome_train = tf_outcome_train.batch(BATCH_SIZE)
+        tf_outcome_train = tf_outcome_train.prefetch(tf.data.AUTOTUNE)
+
+        tf_outcome_val = tf.data.Dataset.from_tensor_slices((X_test, outcomes_test))
+        tf_outcome_val = tf_outcome_val.cache()
+        tf_outcome_val = tf_outcome_val.batch(BATCH_SIZE)
+        tf_outcome_val = tf_outcome_val.prefetch(tf.data.AUTOTUNE)
+
+        #cpc_model.fit(x=X_train, y=cpcs_train.ravel(), epochs=EPOCHS, batch_size=BATCH_SIZE)
+
+    
+        outcome_model.fit(tf_outcome_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_outcome_val)
+
+
+        cpc_model.fit(tf_cpcs_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_cpcs_val)
 
         # Apply model on test fold
         # Impute missing data.
-        X_test = imputer.transform(X_test)
+        #X_test = imputer.transform(X_test)
 
         # Apply models to features.
-        outcome_hat = np.expand_dims(outcome_model.predict(X_test),1)
+        outcome_hat_probability = outcome_model.predict(X_test)
+
+        outcome_hat = (outcome_hat_probability > 0.5)*1
         #print(f"outcome shape = {outcome_hat.shape}")
-        outcome_hat_probability = np.expand_dims(outcome_model.predict_proba(X_test)[:,0],1)
+        #outcome_hat_probability = np.expand_dims(outcome_model.predict_proba(X_test)[:,0],1)
         #print(f"outcome_hat_probability shape = {outcome_hat_probability.shape}")
-        cpc_hat = np.expand_dims(cpc_model.predict(X_test),1)
+        cpc_hat = cpc_model.predict(X_test)
         #print(f"cpc_hat shape = {cpc_hat.shape}")
 
         # Ensure that the CPC score is between (or equal to) 1 and 5.
@@ -334,3 +380,90 @@ def get_features(patient_metadata, recording_metadata, recording_data):
     features = np.hstack((patient_features, recording_features))
 
     return features
+
+def _inception_module(input_tensor, stride=1, activation='linear', use_bottleneck=True, kernel_size=40, bottleneck_size=32, nb_filters=32):
+
+    if use_bottleneck and int(input_tensor.shape[-1]) > 1:
+        input_inception = tf.keras.layers.Conv1D(filters=bottleneck_size, kernel_size=1,
+                                              padding='same', activation=activation, use_bias=False)(input_tensor)
+    else:
+        input_inception = input_tensor
+
+    # kernel_size_s = [3, 5, 8, 11, 17]
+    kernel_size_s = [kernel_size // (2 ** i) for i in range(3)]
+
+    conv_list = []
+
+    for i in range(len(kernel_size_s)):
+        conv_list.append(tf.keras.layers.Conv1D(filters=nb_filters, kernel_size=kernel_size_s[i],
+                                              strides=stride, padding='same', activation=activation, use_bias=False)(
+            input_inception))
+
+    max_pool_1 = tf.keras.layers.MaxPool1D(pool_size=3, strides=stride, padding='same')(input_tensor)
+
+    conv_6 = tf.keras.layers.Conv1D(filters=nb_filters, kernel_size=1,
+                                  padding='same', activation=activation, use_bias=False)(max_pool_1)
+
+    conv_list.append(conv_6)
+
+    x = tf.keras.layers.Concatenate(axis=2)(conv_list)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation(activation='relu')(x)
+    return x
+
+def _shortcut_layer(input_tensor, out_tensor):
+    shortcut_y = tf.keras.layers.Conv1D(filters=int(out_tensor.shape[-1]), kernel_size=1,
+                                      padding='same', use_bias=False)(input_tensor)
+    shortcut_y = tf.keras.layers.BatchNormalization()(shortcut_y)
+
+    x = tf.keras.layers.Add()([shortcut_y, out_tensor])
+    x = tf.keras.layers.Activation('relu')(x)
+    return x
+
+def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr_init = 0.001, kernel_size=40, bottleneck_size=32, nb_filters=32, outputfunc="sigmoid", loss=tf.keras.losses.BinaryCrossentropy()):
+    input_layer = tf.keras.layers.Input(input_shape)
+
+    x = input_layer
+    input_res = input_layer
+
+    for d in range(depth):
+
+        x = _inception_module(x,kernel_size = kernel_size, bottleneck_size=bottleneck_size, nb_filters=nb_filters)
+
+        if use_residual and d % 3 == 2:
+            x = _shortcut_layer(input_res, x)
+            input_res = x
+
+    gap_layer = tf.keras.layers.GlobalAveragePooling1D()(x)
+
+    output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
+    model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
+    model.compile(loss=loss,
+                  optimizer=tf.keras.optimizers.Adam(learning_rate=lr_init))
+    print("Inception model built.")
+    return model
+
+def get_signal_indx(recording_metadata, task):
+  """
+  task: 0,1,2,3 - 0: 0,12 hours, 1: 0-24 hours, 2: 0-48 hours, 3: 0-72 hours
+  signal_len: desired signal lenght to extract from the total signal
+  """
+  TIMESLOTS = np.asarray([(0,12),(0,24),(0,48),(0,72)])
+  time = TIMESLOTS[task]
+  valid_signals = pd.read_csv(StringIO(recording_metadata), sep='\t')[time[0]:time[1]].dropna()
+  if valid_signals.shape[0] > 0:
+    indx = valid_signals.index[valid_signals["Quality"].argmax()]
+  else:
+    indx = np.nan
+  return indx
+
+def get_best_signal(recordings,indx, time):
+    signal = recordings[indx][0]
+    sample_freq = recordings[indx][1]
+    truncated_signal = signal[:,:time*int(sample_freq)]
+    return truncated_signal
+
+def extract_signal(recording_metadata,recordings, task=4,time=30):
+    indx = get_signal_indx(recording_metadata, task)
+    signal = get_best_signal(recordings,indx, time)
+    return signal
