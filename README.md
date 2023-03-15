@@ -6,6 +6,10 @@ Main branch - organizers baseline code
 
 inception_time_dev branch - inception time using one 5min recording pr patient
 
+## New ideas:
+
+![alt text](training.png)
+
 ![alt text](inference.png)
 # Notes from organizers:
 
