@@ -6,7 +6,7 @@ Main branch - organizers baseline code
 
 inception_time_dev branch - inception time using one 5min recording pr patient
 
-
+![alt text](inference.png)
 # Notes from organizers:
 
 ## What's in this repository?
