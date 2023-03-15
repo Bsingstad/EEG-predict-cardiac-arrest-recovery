@@ -233,12 +233,13 @@ def cross_validate_model(data_folder, num_folds, verbose):
         # Ensure that the CPC score is between (or equal to) 1 and 5.
         cpc_hat = np.clip(cpc_hat, 1, 5)
 
-        challenge_score[i] = compute_challenge_score(outcomes_test,outcome_hat_probability)
-        auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_test,outcome_hat_probability)
-        accuracy_outcomes[i], _, _  = compute_accuracy(outcomes_test, outcome_hat)
-        f_measure_outcomes[i], _, _  = compute_f_measure(outcomes_test, outcome_hat)
-        mse_cpcs[i] = compute_mse(cpcs_test, cpc_hat)
-        mae_cpcs[i] = compute_mae(cpcs_test, cpc_hat)
+
+        challenge_score[i] = compute_challenge_score(outcomes_test.ravel(),outcome_hat_probability.ravel())
+        auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_test.ravel(),outcome_hat_probability.ravel())
+        accuracy_outcomes[i], _, _  = compute_accuracy(outcomes_test.ravel(), outcome_hat.ravel())
+        f_measure_outcomes[i], _, _  = compute_f_measure(outcomes_test.ravel(), outcome_hat.ravel())
+        mse_cpcs[i] = compute_mse(cpcs_test.ravel(), cpc_hat.ravel())
+        mae_cpcs[i] = compute_mae(cpcs_test.ravel(), cpc_hat.ravel())
         print(f"challenge_score={challenge_score[i]},  auroc_outcomes={auroc_outcomes[i]}, auprc_outcomes={auprc_outcomes[i]},accuracy_outcomes={accuracy_outcomes[i]}, f_measure_outcomes={f_measure_outcomes[i]}, mse_cpcs={mse_cpcs[i]}, mae_cpcs={mae_cpcs[i]}")
     
     return challenge_score, auroc_outcomes, auprc_outcomes, accuracy_outcomes, f_measure_outcomes, mse_cpcs, mae_cpcs
