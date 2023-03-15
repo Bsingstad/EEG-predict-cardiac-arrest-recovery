@@ -1,5 +1,14 @@
 # Python example code for the George B. Moody PhysioNet Challenge 2023
 
+# My notes:
+
+Main branch - organizers baseline code
+
+inception_time_dev branch - inception time using one 5min recording pr patient
+
+
+# Notes from organizers:
+
 ## What's in this repository?
 
 This repository contains a simple example to illustrate how to format a Python entry for the George B. Moody PhysioNet Challenge 2023. You can try it by running the following commands on the Challenge training sets. These commands should take a few minutes or less to run from start to finish on a recent personal computer.
