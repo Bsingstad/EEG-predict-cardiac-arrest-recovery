@@ -202,6 +202,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
     #features = np.vstack(features)
     signals = np.moveaxis(signals,1,-1)
     #outcomes = np.vstack(outcomes)
+    outcomes = np.expand_dims(outcomes,1)
+    cpcs = np.expand_dims(cpcs,1)
     #cpcs = np.vstack(cpcs)
 
     # Make CV folds
