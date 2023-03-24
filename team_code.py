@@ -139,8 +139,8 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 
 def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
-    TASK = 3
-    SIGNAL_LEN = 60 # in seconds
+    TASK = 4
+    SIGNAL_LEN = 10 # in seconds
     BATCH_SIZE = 20
     EPOCHS = 2
 
