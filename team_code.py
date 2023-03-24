@@ -142,7 +142,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
     TASK = 3
     SIGNAL_LEN = 60 # in seconds
     BATCH_SIZE = 20
-    EPOCHS = 30
+    EPOCHS = 2
 
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -161,9 +161,9 @@ def cross_validate_model(data_folder, num_folds, verbose):
         print('Extracting features and labels from the Challenge data...')
 
     #features = list()
-    signals = list()
-    outcomes = list()
-    cpcs = list()
+    #signals = list()
+    #outcomes = list()
+    #cpcs = list()
 
     for i in range(num_patients):
         if verbose >= 2:
@@ -174,23 +174,35 @@ def cross_validate_model(data_folder, num_folds, verbose):
         patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
 
         # Extract features.
-        current_signal = extract_signal(recording_metadata,recording_data, task=TASK,time=SIGNAL_LEN)
-        signals.append(current_signal)
+        indx = get_signal_indx(recording_metadata, TASK)
+        temp_signals = []
+        for id in indx:
+            temp_signals.append(get_best_signal(recording_data,id, SIGNAL_LEN))
         
+        temp_signals = np.asarray(temp_signals)
 
         #current_features = get_features(patient_metadata, recording_metadata, recording_data)
         #features.append(current_features)
 
         # Extract labels.
-        current_outcome = get_outcome(patient_metadata)
-        outcomes.append(current_outcome)
-        current_cpc = get_cpc(patient_metadata)
-        cpcs.append(current_cpc)
+        if temp_signals.shape[0] > 0:
+            current_outcome = get_outcome(patient_metadata)
+            temp_outcome = np.repeat(current_outcome,temp_signals.shape[0])
+            current_cpc = get_cpc(patient_metadata)
+            temp_cpcs = np.repeat(current_cpc,temp_signals.shape[0])
+            if i > 0:
+                signals = np.vstack([signals,temp_signals])
+                outcomes = np.hstack([outcomes,temp_outcome])
+                cpcs = np.hstack([cpcs,temp_cpcs])
+            elif i == 0:
+                signals = temp_signals
+                outcomes = temp_outcome
+                cpcs = temp_cpcs
 
     #features = np.vstack(features)
-    signals = np.moveaxis(np.asarray(signals),1,-1)
-    outcomes = np.vstack(outcomes)
-    cpcs = np.vstack(cpcs)
+    signals = np.moveaxis(signals,1,-1)
+    #outcomes = np.vstack(outcomes)
+    #cpcs = np.vstack(cpcs)
 
     # Make CV folds
     if verbose >= 1:
@@ -457,7 +469,7 @@ def get_signal_indx(recording_metadata, task):
   time = TIMESLOTS[task]
   valid_signals = pd.read_csv(StringIO(recording_metadata), sep='\t')[time[0]:time[1]].dropna()
   if valid_signals.shape[0] > 0:
-    indx = valid_signals.index[valid_signals["Quality"].argmax()]
+    indx = valid_signals.index
   else:
     indx = np.nan
   return indx
