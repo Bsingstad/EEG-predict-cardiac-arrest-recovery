@@ -25,6 +25,7 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 from sklearn.model_selection import KFold
 from typing import Generator, Optional
 import librosa
+from scipy import signal
 
 ################################################################################
 #
@@ -192,22 +193,43 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
         # Split into train & validation
         patient_ids_train, patient_ids_val = patient_ids[train_index], patient_ids[val_index]
-        sig_df, pat_num = get_number_of_signals_in_patient_list(data_folder, patient_ids_train)
+        sig_df_train, pat_num_train = get_number_of_signals_in_patient_list(data_folder, patient_ids_train)
+        sig_df_val, pat_num_val = get_number_of_signals_in_patient_list(data_folder, patient_ids_train)
 
         # Define the models
-        outcome_model = cnn_model((128, 235, 18), 1, "sigmoid")
-        outcome_model.compile(optimizer = "adam" , loss = "binary_crossentropy", metrics=["accuracy"])
+        #outcome_model = cnn_model((128, 235, 18), 1, "sigmoid")
+        outcome_model = build_inception_model((3000,18), 1, outputfunc="sigmoid",loss=tf.keras.losses.BinaryCrossentropy())
+        outcome_model.compile(optimizer = "adam" , loss = "binary_crossentropy", metrics=[
+            tf.keras.metrics.AUC(num_thresholds=200,curve='ROC', summation_method='interpolation',name="ROC",multi_label=False),
+            tf.keras.metrics.AUC(num_thresholds=200,curve='PR',summation_method='interpolation',name="PRC",multi_label=False)])
 
-        cpcs_model = cnn_model((128, 235, 18), 1, "softmax") #TODO: add support for regression - InceptionTime model
-        cpcs_model.compile(optimizer = "adam" , loss = "categorical_crossentropy", metrics=["accuracy"])
+        #cpcs_model = cnn_model((128, 235, 18), 1, "softmax") 
+        cpcs_model = build_inception_model((3000,18), 5, outputfunc="softmax",loss=tf.keras.losses.CategoricalCrossentropy())
+        cpcs_model.compile(optimizer = "adam" , loss = "categorical_crossentropy", metrics=[
+            tf.keras.metrics.AUC(num_thresholds=200,curve='ROC', summation_method='interpolation',name="ROC",multi_label=False),
+            tf.keras.metrics.AUC(num_thresholds=200,curve='PR',summation_method='interpolation',name="PRC",multi_label=False)])
+
+
+
         # Train the models.
-        outcome_model.fit(x=batch_generator(BATCH_SIZE,
-                                            generate_data(folder= data_folder, patient_ids=patient_ids_train, label="outcome",rec_df = sig_df.reset_index())), 
-                                            steps_per_epoch=sig_df.shape[0]/BATCH_SIZE, epochs=EPOCHS, verbose=1)
+        outcome_model.fit(epochs=EPOCHS, verbose=1,
+            x=batch_generator(BATCH_SIZE,generate_data_new(
+            folder= data_folder, patient_ids=patient_ids_train, label="outcome",rec_df = sig_df_train.reset_index())),
 
-        cpcs_model.fit(x=batch_generator(BATCH_SIZE,
-                                            generate_data(folder= data_folder, patient_ids=patient_ids_train, label="cpcs",rec_df = sig_df.reset_index())), 
-                                            steps_per_epoch=sig_df.shape[0]/BATCH_SIZE, epochs=EPOCHS, verbose=1)
+            validation_data=batch_generator(BATCH_SIZE,generate_data_new(
+            folder= data_folder, patient_ids=patient_ids_val, label="outcome",rec_df = sig_df_val.reset_index())),
+
+            steps_per_epoch=sig_df_train.shape[0]/BATCH_SIZE, validation_steps=sig_df_val.shape[0]/BATCH_SIZE,validation_freq=1)
+
+        cpcs_model.fit(
+            x=batch_generator(BATCH_SIZE,generate_data_new(
+            folder= data_folder, patient_ids=patient_ids_train, label="cpcs",rec_df = sig_df_train.reset_index())),
+            
+            validation_data=batch_generator(BATCH_SIZE,generate_data_new(
+            folder= data_folder, patient_ids=patient_ids_val, label="cpcs",rec_df = sig_df_val.reset_index())),
+
+            steps_per_epoch=sig_df_train.shape[0]/BATCH_SIZE, validation_steps=sig_df_val.shape[0]/BATCH_SIZE,validation_freq=1)
+
 
         # Get validation labels
         outcomes_val = outcomes[val_index]
@@ -285,6 +307,94 @@ def generate_data(folder: str, patient_ids: list, label: str, rec_df:pd.DataFram
                         print("wrong label")
 
                     yield X_data, y_data
+
+def generate_data_new(folder: str, patient_ids: list, label: str, rec_df:pd.DataFrame):
+    while True:
+        for roll_indx in range(72): 
+            for id in patient_ids:
+                indx = np.where(np.asarray(rec_df["Record"].str.split("_").to_list())[:,1] == id.split("_")[1])[0]
+                indx = np.roll(indx,-roll_indx)
+                row = rec_df.T.pop(indx[0])
+                rec_id = int(row["Record"].split("_")[-1])
+                patient_metadata, recording_metadata, recordings = load_challenge_data(folder, id)
+                X_data = []
+                if recordings[rec_id][1] != None:
+                    for recording in recordings[rec_id][0]:
+                        X_data.append(signal.resample(recording,3000))
+                    X_data = np.asarray(X_data)
+                    X_data = np.moveaxis(X_data,0,-1)
+                    if label == "outcome":
+                        y_data = get_outcome(patient_metadata)
+                    elif label == "cpcs":
+                        indx  = get_cpc(patient_metadata)
+                        y_data = np.zeros(5)
+                        y_data[int(indx)-1] = 1
+                    else:
+                        print("wrong label")
+
+                    yield X_data, y_data
+                    
+def _inception_module(input_tensor, stride=1, activation='linear', use_bottleneck=True, kernel_size=40, bottleneck_size=32, nb_filters=32):
+
+    if use_bottleneck and int(input_tensor.shape[-1]) > 1:
+        input_inception = tf.keras.layers.Conv1D(filters=bottleneck_size, kernel_size=1,
+                                              padding='same', activation=activation, use_bias=False)(input_tensor)
+    else:
+        input_inception = input_tensor
+
+    # kernel_size_s = [3, 5, 8, 11, 17]
+    kernel_size_s = [kernel_size // (2 ** i) for i in range(3)]
+
+    conv_list = []
+
+    for i in range(len(kernel_size_s)):
+        conv_list.append(tf.keras.layers.Conv1D(filters=nb_filters, kernel_size=kernel_size_s[i],
+                                              strides=stride, padding='same', activation=activation, use_bias=False)(
+            input_inception))
+
+    max_pool_1 = tf.keras.layers.MaxPool1D(pool_size=3, strides=stride, padding='same')(input_tensor)
+
+    conv_6 = tf.keras.layers.Conv1D(filters=nb_filters, kernel_size=1,
+                                  padding='same', activation=activation, use_bias=False)(max_pool_1)
+
+    conv_list.append(conv_6)
+
+    x = tf.keras.layers.Concatenate(axis=2)(conv_list)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation(activation='relu')(x)
+    return x
+
+def _shortcut_layer(input_tensor, out_tensor):
+    shortcut_y = tf.keras.layers.Conv1D(filters=int(out_tensor.shape[-1]), kernel_size=1,
+                                      padding='same', use_bias=False)(input_tensor)
+    shortcut_y = tf.keras.layers.BatchNormalization()(shortcut_y)
+
+    x = tf.keras.layers.Add()([shortcut_y, out_tensor])
+    x = tf.keras.layers.Activation('relu')(x)
+    return x
+
+def build_inception_model(input_shape, nb_classes, depth=6, use_residual=True, lr_init = 0.001, kernel_size=40, bottleneck_size=32, nb_filters=32, outputfunc="sigmoid", loss=tf.keras.losses.BinaryCrossentropy()):
+    input_layer = tf.keras.layers.Input(input_shape)
+
+    x = input_layer
+    input_res = input_layer
+
+    for d in range(depth):
+
+        x = _inception_module(x,kernel_size = kernel_size, bottleneck_size=bottleneck_size, nb_filters=nb_filters)
+
+        if use_residual and d % 3 == 2:
+            x = _shortcut_layer(input_res, x)
+            input_res = x
+
+    gap_layer = tf.keras.layers.GlobalAveragePooling1D()(x)
+
+    output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
+    model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
+    model.compile(loss=loss,
+                  optimizer=tf.keras.optimizers.Adam(learning_rate=lr_init))
+    print("Inception model built.")
+    return model
 
 def cnn_model(input_shape, num_output, last_act = "softmax"):
     inputlayer = tf.keras.layers.Input((input_shape))
