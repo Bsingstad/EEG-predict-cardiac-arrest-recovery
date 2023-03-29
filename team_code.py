@@ -20,7 +20,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import StratifiedKFold
 import joblib
 import tensorflow as tf
-
+from scipy import signal
 ################################################################################
 #
 # Required functions. Edit these functions to add your code, but do not change the arguments of the functions.
@@ -139,10 +139,10 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 
 def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
-    TASK = 4
+
     SIGNAL_LEN = 10 # in seconds
-    BATCH_SIZE = 20
-    EPOCHS = 2
+    BATCH_SIZE = 30
+    EPOCHS = 15
 
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -160,10 +160,9 @@ def cross_validate_model(data_folder, num_folds, verbose):
     if verbose >= 1:
         print('Extracting features and labels from the Challenge data...')
 
-    #features = list()
-    #signals = list()
-    #outcomes = list()
-    #cpcs = list()
+    outcomes = list()
+    cpcs = list()
+    X_data = list()
 
     for i in range(num_patients):
         if verbose >= 2:
@@ -173,34 +172,20 @@ def cross_validate_model(data_folder, num_folds, verbose):
         patient_id = patient_ids[i]
         patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
 
-        # Extract features.
-        indx = get_signal_indx(recording_metadata, TASK)
-        temp_signals = []
-        for id in indx:
-            temp_signals.append(get_best_signal(recording_data,id, SIGNAL_LEN))
-        
-        temp_signals = np.asarray(temp_signals)
+        for rec in recording_data:
+            if rec[1] != None:
+                dwn_smp_rec = []
+                for lead in rec[0]:
+                    dwn_smp_rec.append(signal.resample(lead,3000))
+                dwn_smp_rec = np.asarray(dwn_smp_rec)
+                outcomes.append(get_outcome(patient_metadata))
+                cpcs.append(get_cpc(patient_metadata))
+                X_data.append(dwn_smp_rec)
 
-        #current_features = get_features(patient_metadata, recording_metadata, recording_data)
-        #features.append(current_features)
-
-        # Extract labels.
-        if temp_signals.shape[0] > 0:
-            current_outcome = get_outcome(patient_metadata)
-            temp_outcome = np.repeat(current_outcome,temp_signals.shape[0])
-            current_cpc = get_cpc(patient_metadata)
-            temp_cpcs = np.repeat(current_cpc,temp_signals.shape[0])
-            if i > 0:
-                signals = np.vstack([signals,temp_signals])
-                outcomes = np.hstack([outcomes,temp_outcome])
-                cpcs = np.hstack([cpcs,temp_cpcs])
-            elif i == 0:
-                signals = temp_signals
-                outcomes = temp_outcome
-                cpcs = temp_cpcs
+    X_data = np.asarray(X_data)
 
     #features = np.vstack(features)
-    signals = np.moveaxis(signals,1,-1)
+    X_data = np.moveaxis(X_data,1,-1)
     #outcomes = np.vstack(outcomes)
     outcomes = np.expand_dims(outcomes,1)
     cpcs = np.expand_dims(cpcs,1)
@@ -215,10 +200,6 @@ def cross_validate_model(data_folder, num_folds, verbose):
     # Train the models.
     if verbose >= 1:
         print('Training the Challenge models on the Challenge data...')
-        # Define parameters for random forest classifier and regressor.
-    n_estimators   = 123  # Number of trees in the forest.
-    max_leaf_nodes = 456  # Maximum number of leaf nodes in each tree.
-    random_state   = 789  # Random state; set for reproducibility.
 
 
     challenge_score = np.zeros(num_folds)
@@ -231,10 +212,10 @@ def cross_validate_model(data_folder, num_folds, verbose):
     all_preds_outcome  = []
     all_labels_outcome  = []
 
-    for i, (train_index, test_index) in enumerate(skf.split(signals, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
+    for i, (train_index, test_index) in enumerate(skf.split(X_data, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
         print(f"Fold {i}:")
 
-        X_train, X_test = signals[train_index], signals[test_index]
+        X_train, X_test = X_data[train_index], X_data[test_index]
         outcomes_train, outcomes_test = outcomes[train_index], outcomes[test_index]
         cpcs_train, cpcs_test = cpcs[train_index], cpcs[test_index]
 
@@ -243,10 +224,14 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
         # Train the models.
         #X_train = imputer.transform(X_train)
-        outcome_model = build_iception_model(signals.shape[1:], outcomes.shape[1], outputfunc="sigmoid",loss=tf.keras.losses.BinaryCrossentropy())
+        outcome_model = build_iception_model(X_data.shape[1:], outcomes.shape[1], outputfunc="sigmoid")
+        outcome_model.compile(loss=tf.keras.losses.BinaryCrossentropy(),optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), metrics=[
+            tf.keras.metrics.AUC(num_thresholds=200,curve='ROC', summation_method='interpolation',name="ROC",multi_label=False),
+            tf.keras.metrics.AUC(num_thresholds=200,curve='PR',summation_method='interpolation',name="PRC",multi_label=False)])
         #outcome_model = RandomForestClassifier(
         #    n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, outcomes_train.ravel())
-        cpc_model = build_iception_model(signals.shape[1:], cpcs.shape[1], outputfunc="linear",loss=tf.keras.losses.MeanSquaredError())
+        cpc_model = build_iception_model(X_data.shape[1:], cpcs.shape[1], outputfunc="linear")
+        cpc_model.compile(loss=tf.keras.losses.MeanSquaredError(),optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001))
         #cpc_model = RandomForestRegressor(
         #    n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, cpcs_train.ravel())
 
@@ -457,8 +442,7 @@ def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr
 
     output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
     model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
-    model.compile(loss=loss,
-                  optimizer=tf.keras.optimizers.Adam(learning_rate=lr_init))
+
     print("Inception model built.")
     return model
 
