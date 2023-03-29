@@ -140,7 +140,8 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
 
-    SIGNAL_LEN = 10 # in seconds
+    SIGNAL_LEN = 30000 # samples
+    DIVISOR = 2
     BATCH_SIZE = 30
     EPOCHS = 15
 
@@ -176,7 +177,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
             if rec[1] != None:
                 dwn_smp_rec = []
                 for lead in rec[0]:
-                    dwn_smp_rec.append(signal.resample(lead,3000))
+                    dwn_smp_rec.append(signal.resample(lead,SIGNAL_LEN/DIVISOR))
                 dwn_smp_rec = np.asarray(dwn_smp_rec)
                 outcomes.append(get_outcome(patient_metadata))
                 cpcs.append(get_cpc(patient_metadata))
@@ -225,13 +226,13 @@ def cross_validate_model(data_folder, num_folds, verbose):
         # Train the models.
         #X_train = imputer.transform(X_train)
         outcome_model = build_iception_model(X_data.shape[1:], outcomes.shape[1], outputfunc="sigmoid")
-        outcome_model.compile(loss=tf.keras.losses.BinaryCrossentropy(),optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), metrics=[
+        outcome_model.compile(loss=tf.keras.losses.BinaryCrossentropy(),optimizer=tf.keras.optimizers.Adam(learning_rate=0.00001), metrics=[
             tf.keras.metrics.AUC(num_thresholds=200,curve='ROC', summation_method='interpolation',name="ROC",multi_label=False),
             tf.keras.metrics.AUC(num_thresholds=200,curve='PR',summation_method='interpolation',name="PRC",multi_label=False)])
         #outcome_model = RandomForestClassifier(
         #    n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, outcomes_train.ravel())
         cpc_model = build_iception_model(X_data.shape[1:], cpcs.shape[1], outputfunc="linear")
-        cpc_model.compile(loss=tf.keras.losses.MeanSquaredError(),optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001))
+        cpc_model.compile(loss=tf.keras.losses.MeanSquaredError(),optimizer=tf.keras.optimizers.Adam(learning_rate=0.00001))
         #cpc_model = RandomForestRegressor(
         #    n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, cpcs_train.ravel())
 
