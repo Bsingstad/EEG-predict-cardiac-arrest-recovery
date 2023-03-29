@@ -22,7 +22,9 @@ import joblib
 import tensorflow as tf
 from scipy import signal
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+from sklearn.model_selection import KFold
 from typing import Generator, Optional
+import librosa
 
 ################################################################################
 #
@@ -144,13 +146,14 @@ def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
     TASK = 4
     SIGNAL_LEN = 10 # in seconds
-    BATCH_SIZE = 20
+    BATCH_SIZE = 10
     EPOCHS = 2
 
     if verbose >= 1:
         print('Finding the Challenge data...')
 
     patient_ids = find_data_folders(data_folder)
+    patient_ids = np.asarray(patient_ids)
     num_patients = len(patient_ids)
 
     if num_patients==0:
@@ -160,36 +163,17 @@ def cross_validate_model(data_folder, num_folds, verbose):
     if verbose >= 1:
         print('Extracting features and labels from the Challenge data...')
 
-    
-    outcomes = list()
-    cpcs = list()
-    for i in range(num_patients):
-        if verbose >= 2:
-            print('    {}/{}...'.format(i+1, num_patients))
-
-        # Load data patient metadata
-        patient_id = patient_ids[i]
-        patient_metadata, _, _ = load_challenge_data(data_folder, patient_id)
-        current_outcome = get_outcome(patient_metadata)
-        current_cpcs = get_cpc(patient_metadata)
-        outcomes.append(current_outcome)
-        cpcs.append(current_cpcs)
-    outcomes = np.asarray(outcomes)
-    cpcs = np.asarray(cpcs)
-    #outcomes = np.expand_dims(outcomes,1)
-    #cpcs = np.expand_dims(cpcs,1)
-
 
     # Make CV folds
     if verbose >= 1:
         print('Split the data into {} cross-validation folds'.format(num_folds))
     
-    skf = StratifiedKFold(n_splits=num_folds, random_state=None, shuffle=False)
-
+    #skf = StratifiedKFold(n_splits=num_folds, random_state=None, shuffle=False)
+    kf = KFold(n_splits=num_folds)
     # Train the models.
     if verbose >= 1:
         print('Training the Challenge models on the Challenge data...')
-
+    
 
     challenge_score = np.zeros(num_folds)
     auroc_outcomes = np.zeros(num_folds)
@@ -201,20 +185,29 @@ def cross_validate_model(data_folder, num_folds, verbose):
     all_preds_outcome  = []
     all_labels_outcome  = []
 
-    for i, (train_index, val_index) in enumerate(skf.split(cpcs, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
+    #for i, (train_index, val_index) in enumerate(skf.split(cpcs, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
+    for i, (train_index, val_index) in enumerate(kf.split(patient_ids)):    
         print(f"Fold {i}:")
+
 
         # Split into train & validation
         patient_ids_train, patient_ids_val = patient_ids[train_index], patient_ids[val_index]
+        sig_num, pat_num = get_number_of_signals_in_patient_list(data_folder, patient_ids_train)
 
         # Define the models
-        outcome_model = inception_time_model("tf_inception",n_classes=1, input_shape=(3000,18), pred_type="clf")
+        outcome_model = cnn_model((128, 235, 18), 1, "sigmoid")
+        outcome_model.compile(optimizer = "adam" , loss = "binary_crossentropy", metrics=["accuracy"])
 
-        cpcs_model = inception_time_model("tf_inception",n_classes=5, input_shape=(3000,18), pred_type="reg") #TODO: add support for regression - InceptionTime model
+        cpcs_model = cnn_model((128, 235, 18), 1, "softmax") #TODO: add support for regression - InceptionTime model
+        cpcs_model.compile(optimizer = "adam" , loss = "categorical_crossentropy", metrics=["accuracy"])
         # Train the models.
-        outcome_model.fit(patient_ids_train,patient_ids_val, epochs=EPOCHS, batch_size=BATCH_SIZE)
+        outcome_model.fit(x=batch_generator(BATCH_SIZE,
+                                            generate_data(folder= data_folder, patient_ids=patient_ids_train, label="outcome")), 
+                                            steps_per_epoch=sig_num/BATCH_SIZE, epochs=EPOCHS, verbose=2)
 
-        cpcs_model.fit(patient_ids_train,patient_ids_val, epochs=EPOCHS, batch_size=BATCH_SIZE)
+        cpcs_model.fit(x=batch_generator(BATCH_SIZE,
+                                            generate_data(folder= data_folder, patient_ids=patient_ids_train, label="cpcs")), 
+                                            steps_per_epoch=sig_num/BATCH_SIZE, epochs=EPOCHS, verbose=2)
 
         # Get validation labels
         outcomes_val = outcomes[val_index]
@@ -253,191 +246,73 @@ def save_challenge_model(model_folder, imputer, outcome_model, cpc_model):
     filename = os.path.join(model_folder, 'models.sav')
     joblib.dump(d, filename, protocol=0)
 
-
-def batch_generator(
-    batch_size: int,
-    gen_x: Generator,
-    gen_y: Generator,
-    num_leads: int,
-    samp_freq: int,
-    time: int,
-):
-    batch_features = np.zeros((batch_size, samp_freq * time, num_leads))
-    batch_labels_1 = np.zeros((batch_size, 1))
+def batch_generator(batch_size: int, gen: Generator):
+    batch_features = []
+    batch_labels = []
 
     while True:
         for i in range(batch_size):
+            X_temp, y_temp = next(gen)
+            batch_features.append(X_temp)
+            batch_labels.append(y_temp)
 
-            batch_features[i] = next(gen_x)
-            batch_labels_1[i] = next(gen_y)
+        yield np.asarray(batch_features), np.asarray(batch_labels)
 
-        yield batch_features, batch_labels_1
-
-
-def generate_cpcs(y_train: np.ndarray):
+def generate_data(folder: str, patient_ids: list, label: str):
     while True:
-        for i in y_train:
-            yield i
+        for rec_id in range(72):
+            for id in patient_ids:
+                patient_metadata, recording_metadata, recordings = load_challenge_data(folder, id)
+                if recordings[rec_id][1] != None: # if sampling freq == None -> no signal
+                    X_data = []
+                    for recording in recordings[rec_id][0]:
+                        S = librosa.feature.melspectrogram(y=recording, sr=recordings[rec_id][1],n_mels=128,fmin=0,fmax=recordings[rec_id][1]/2.5,n_fft=256,hop_length=128)
+                        S_dB = librosa.power_to_db(S, ref=np.max)
+                        X_data.append(S_dB)
+                    X_data = np.asarray(X_data)
+                    X_data = np.moveaxis(X_data,0,-1)
+                    if label == "outcome":
+                        y_data = get_outcome(patient_metadata)
+                    elif label == "cpcs":
+                        indx  = get_cpc(patient_metadata)
+                        y_data = np.zeros(5)
+                        y_data[int(indx)-1] = 1
+                    else:
+                        print("wrong label")
 
-def generate_outcomes(y_train: np.ndarray):
-    while True:
-        for i in y_train:
-            yield i
+                    yield X_data, y_data
 
-
-def generate_eegs(X_train: np.ndarray, samp_freq: int, num_leads: int):
-    while True:
-        for h in X_train:
-            data, header_data = load_challenge_data(h)
-            if int(header_data[0].split(" ")[2]) != samp_freq:
-                data_new = np.ones(
-                    [
-                        num_leads,
-                        int(
-                            (
-                                int(header_data[0].split(" ")[3])
-                                / int(header_data[0].split(" ")[2])
-                            )
-                            * samp_freq
-                        ),
-                    ]
-                )
-                for i, j in enumerate(data):
-                    data_new[i] = signal.resample(
-                        j,
-                        int(
-                            (
-                                int(header_data[0].split(" ")[3])
-                                / int(header_data[0].split(" ")[2])
-                            )
-                            * samp_freq
-                        ),
-                    )
-                data = data_new
-                data = pad_sequences(
-                    data, maxlen=samp_freq * 10, truncating="post", padding="post"
-                )
-            data = np.moveaxis(data, 0, -1)
-            yield data
-
-
-
-class ClassificationModel(object):
-
-    def __init__(self):
-        pass
-
-    def fit(self, X_train, y_train, X_val, y_val):
-        pass
-            
-    def predict(self, X, full_sequence=True):
-        pass
-
-class inception_time_model(ClassificationModel):
-    def __init__(self, name, n_classes, input_shape, pred_type="clf", batch_size=32, lr_init = 0.001, lr_red="yes", model_depth=6, kernel_size=40, bottleneck_size=32, nb_filters=32):
-        super(inception_time_model, self).__init__()
-        self.name = name
-        self.pred_type = pred_type
-        self.model = build_model((input_shape),n_classes,lr_init = 0.001, depth=model_depth, kernel_size=40, bottleneck_size=32, nb_filters=32,clf="binary")
-        self.batch_size = batch_size
-        self.lr_red = lr_red
-        
-
-    def fit(self, train_id, val_id, epochs, batch_size):
-        if self.pred_type == "clf":
-            gen_train_labels = generate_outcomes(train_id)
-            gen_val_labels = generate_outcomes(val_id)
-        elif self.pred_type == "reg":
-            gen_train_labels = generate_cpcs(train_id)
-            gen_val_labels = generate_cpcs(val_id)
-
-        history = self.model.fit(x=batch_generator(batch_size=batch_size, gen_x=generate_eegs(train_id), gen_y=gen_train_labels), epochs=epochs, 
-              steps_per_epoch=(len(train_id)/batch_size), # TODO: train_id is not the right thing here 
-              validation_data=batch_generator(batch_size=batch_size, gen_x=generate_eegs(train_id), gen_y=gen_val_labels), validation_freq=1, validation_steps = (len(val_id)/batch_size), # TODO: val_id is not the right thing here  
-              verbose = 1, 
-              #callbacks = [tf.keras.callbacks.LearningRateScheduler(scheduler, verbose=1)
-              )
-
-    def predict(self, X):
-        return self.model.predict(X)
-
-
-def _inception_module(input_tensor, stride=1, activation='linear', use_bottleneck=True, kernel_size=40, bottleneck_size=32, nb_filters=32):
-
-    if use_bottleneck and int(input_tensor.shape[-1]) > 1:
-        input_inception = tf.keras.layers.Conv1D(filters=bottleneck_size, kernel_size=1,
-                                              padding='same', activation=activation, use_bias=False)(input_tensor)
-    else:
-        input_inception = input_tensor
-
-    # kernel_size_s = [3, 5, 8, 11, 17]
-    kernel_size_s = [kernel_size // (2 ** i) for i in range(3)]
-
-    conv_list = []
-
-    for i in range(len(kernel_size_s)):
-        conv_list.append(tf.keras.layers.Conv1D(filters=nb_filters, kernel_size=kernel_size_s[i],
-                                              strides=stride, padding='same', activation=activation, use_bias=False)(
-            input_inception))
-
-    max_pool_1 = tf.keras.layers.MaxPool1D(pool_size=3, strides=stride, padding='same')(input_tensor)
-
-    conv_6 = tf.keras.layers.Conv1D(filters=nb_filters, kernel_size=1,
-                                  padding='same', activation=activation, use_bias=False)(max_pool_1)
-
-    conv_list.append(conv_6)
-
-    x = tf.keras.layers.Concatenate(axis=2)(conv_list)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Activation(activation='relu')(x)
-    return x
-
-def _shortcut_layer(input_tensor, out_tensor):
-    shortcut_y = tf.keras.layers.Conv1D(filters=int(out_tensor.shape[-1]), kernel_size=1,
-                                      padding='same', use_bias=False)(input_tensor)
-    shortcut_y = tf.keras.layers.BatchNormalization()(shortcut_y)
-
-    x = tf.keras.layers.Add()([shortcut_y, out_tensor])
-    x = tf.keras.layers.Activation('relu')(x)
-    return x
-
-def build_model(input_shape, nb_classes, depth=6, use_residual=True, lr_init = 0.001, kernel_size=40, bottleneck_size=32, nb_filters=32, clf="binary"):
-    input_layer = tf.keras.layers.Input(input_shape)
-
-    x = input_layer
-    input_res = input_layer
-
-    for d in range(depth):
-
-        x = _inception_module(x,kernel_size = kernel_size, bottleneck_size=bottleneck_size, nb_filters=nb_filters)
-
-        if use_residual and d % 3 == 2:
-            x = _shortcut_layer(input_res, x)
-            input_res = x
-
-    gap_layer = tf.keras.layers.GlobalAveragePooling1D()(x)
-
-    output_layer = tf.keras.layers.Dense(units=nb_classes,activation='sigmoid')(gap_layer)  
-    model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
-    model.compile(loss=tf.keras.losses.BinaryCrossentropy(), optimizer=tf.keras.optimizers.Adam(learning_rate=lr_init), 
-                  metrics=[tf.keras.metrics.BinaryAccuracy(),
-                           tf.keras.metrics.AUC(
-                        num_thresholds=200,
-                        curve='ROC',
-                        summation_method='interpolation',
-                        name="ROC",
-                        multi_label=True,
-                        ),
-                       tf.keras.metrics.AUC(
-                        num_thresholds=200,
-                        curve='PR',
-                        summation_method='interpolation',
-                        name="PRC",
-                        multi_label=True,
-                        )
-              ])
-    print("Inception model built.")
+def cnn_model(input_shape, num_output, last_act = "softmax"):
+    inputlayer = tf.keras.layers.Input((input_shape))
+    conv1 = tf.keras.layers.Conv2D(filters = 32, kernel_size = (5,5),padding = 'Same', activation ='relu')(inputlayer)
+    conv2 = tf.keras.layers.Conv2D(filters = 32, kernel_size = (5,5),padding = 'Same', activation ='relu')(conv1)
+    mp1 = tf.keras.layers.MaxPool2D(pool_size=(2,2))(conv2)
+    drop1 = tf.keras.layers.Dropout(0.25)(mp1)
+    conv3 = tf.keras.layers.Conv2D(filters = 32, kernel_size = (5,5),padding = 'Same', activation ='relu')(drop1)
+    conv4 = tf.keras.layers.Conv2D(filters = 32, kernel_size = (5,5),padding = 'Same', activation ='relu')(conv3)
+    mp2 = tf.keras.layers.MaxPool2D(pool_size=(2,2))(conv4)
+    drop2 = tf.keras.layers.Dropout(0.25)(mp2)
+    flatten = tf.keras.layers.Flatten()(drop2)
+    dense1 = tf.keras.layers.Dense(256, activation = "relu")(flatten)
+    drop3 = tf.keras.layers.Dropout(0.25)(dense1)
+    out = tf.keras.layers.Dense(num_output, activation = last_act)(drop3)
+    model = tf.keras.models.Model(inputs=inputlayer, outputs=out)
     return model
+
+def get_number_of_signals_in_patient_list(data_folder,patient_ids):
+  df = 0
+  cnt = 0
+  for root, dirs, files in os.walk(data_folder):
+    for name in files:
+        if root.split("/")[2] in patient_ids:
+          if os.path.join(root, name).endswith(".tsv"):
+            df_temp = pd.read_csv(os.path.join(root, name), sep="\t").dropna()
+            if cnt == 0:
+              df = df_temp
+            else:
+              df = pd.concat([df,df_temp])
+            cnt+=1
+  return df.shape[0], cnt
 
 def scheduler(epoch, lr):
     if epoch % 5 == 0:
