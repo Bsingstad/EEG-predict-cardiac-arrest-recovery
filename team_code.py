@@ -192,8 +192,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
         # Split into train & validation
         patient_ids_train, patient_ids_val = patient_ids[train_index], patient_ids[val_index]
-        sig_num, pat_num = get_number_of_signals_in_patient_list(data_folder, patient_ids_train)
-    
+        sig_df, pat_num = get_number_of_signals_in_patient_list(data_folder, patient_ids_train)
 
         # Define the models
         outcome_model = cnn_model((128, 235, 18), 1, "sigmoid")
@@ -203,12 +202,12 @@ def cross_validate_model(data_folder, num_folds, verbose):
         cpcs_model.compile(optimizer = "adam" , loss = "categorical_crossentropy", metrics=["accuracy"])
         # Train the models.
         outcome_model.fit(x=batch_generator(BATCH_SIZE,
-                                            generate_data(folder= data_folder, patient_ids=patient_ids_train, label="outcome")), 
-                                            steps_per_epoch=sig_num/BATCH_SIZE, epochs=EPOCHS, verbose=2)
+                                            generate_data(folder= data_folder, patient_ids=patient_ids_train, label="outcome",rec_df = sig_df.reset_index())), 
+                                            steps_per_epoch=sig_df.shape[0]/BATCH_SIZE, epochs=EPOCHS, verbose=1)
 
         cpcs_model.fit(x=batch_generator(BATCH_SIZE,
-                                            generate_data(folder= data_folder, patient_ids=patient_ids_train, label="cpcs")), 
-                                            steps_per_epoch=sig_num/BATCH_SIZE, epochs=EPOCHS, verbose=2)
+                                            generate_data(folder= data_folder, patient_ids=patient_ids_train, label="cpcs",rec_df = sig_df.reset_index())), 
+                                            steps_per_epoch=sig_df.shape[0]/BATCH_SIZE, epochs=EPOCHS, verbose=1)
 
         # Get validation labels
         outcomes_val = outcomes[val_index]
@@ -259,13 +258,17 @@ def batch_generator(batch_size: int, gen: Generator):
 
         yield np.asarray(batch_features), np.asarray(batch_labels)
 
-def generate_data(folder: str, patient_ids: list, label: str):
+def generate_data(folder: str, patient_ids: list, label: str, rec_df:pd.DataFrame):
     while True:
-        for rec_id in range(72):
+        for roll_indx in range(72): 
             for id in patient_ids:
+                indx = np.where(np.asarray(rec_df["Record"].str.split("_").to_list())[:,1] == id.split("_")[1])[0]
+                indx = np.roll(indx,-roll_indx)
+                row = rec_df.T.pop(indx[0])
+                rec_id = int(row["Record"].split("_")[-1])
                 patient_metadata, recording_metadata, recordings = load_challenge_data(folder, id)
-                if recordings[rec_id][1] != None: # if sampling freq == None -> no signal
-                    X_data = []
+                X_data = []
+                if recordings[rec_id][1] != None:
                     for recording in recordings[rec_id][0]:
                         S = librosa.feature.melspectrogram(y=recording, sr=recordings[rec_id][1],n_mels=128,fmin=0,fmax=recordings[rec_id][1]/2.5,n_fft=256,hop_length=128)
                         S_dB = librosa.power_to_db(S, ref=np.max)
@@ -313,7 +316,7 @@ def get_number_of_signals_in_patient_list(data_folder,patient_ids):
             else:
               df = pd.concat([df,df_temp])
             cnt+=1
-  return df.shape[0], cnt
+  return df, cnt
 
 def scheduler(epoch, lr):
     if epoch % 5 == 0:
