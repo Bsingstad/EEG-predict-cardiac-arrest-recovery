@@ -193,6 +193,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
         # Split into train & validation
         patient_ids_train, patient_ids_val = patient_ids[train_index], patient_ids[val_index]
         sig_num, pat_num = get_number_of_signals_in_patient_list(data_folder, patient_ids_train)
+    
 
         # Define the models
         outcome_model = cnn_model((128, 235, 18), 1, "sigmoid")
@@ -304,7 +305,7 @@ def get_number_of_signals_in_patient_list(data_folder,patient_ids):
   cnt = 0
   for root, dirs, files in os.walk(data_folder):
     for name in files:
-        if root.split("/")[2] in patient_ids:
+        if root.split("/")[-1] in patient_ids:
           if os.path.join(root, name).endswith(".tsv"):
             df_temp = pd.read_csv(os.path.join(root, name), sep="\t").dropna()
             if cnt == 0:
