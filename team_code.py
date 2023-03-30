@@ -17,7 +17,7 @@ from io import StringIO
 import mne
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import KFold
 import joblib
 import tensorflow as tf
 from scipy import signal
@@ -141,9 +141,10 @@ def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
 
     SIGNAL_LEN = 30000 # samples
-    DIVISOR = 2
+    DIVISOR = 10
     BATCH_SIZE = 30
     EPOCHS = 15
+    LEARNING_RATE = 0.00001
 
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -164,6 +165,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
     outcomes = list()
     cpcs = list()
     X_data = list()
+    recording_id = list()
 
     for i in range(num_patients):
         if verbose >= 2:
@@ -177,31 +179,27 @@ def cross_validate_model(data_folder, num_folds, verbose):
             if rec[1] != None:
                 dwn_smp_rec = []
                 for lead in rec[0]:
-                    dwn_smp_rec.append(signal.resample(lead,SIGNAL_LEN/DIVISOR))
+                    dwn_smp_rec.append(signal.resample(lead,SIGNAL_LEN//DIVISOR))
                 dwn_smp_rec = np.asarray(dwn_smp_rec)
                 outcomes.append(get_outcome(patient_metadata))
                 cpcs.append(get_cpc(patient_metadata))
                 X_data.append(dwn_smp_rec)
+                recording_id.append(get_patient_id(patient_metadata))
 
     X_data = np.asarray(X_data)
-
-    #features = np.vstack(features)
     X_data = np.moveaxis(X_data,1,-1)
-    #outcomes = np.vstack(outcomes)
+
     outcomes = np.expand_dims(outcomes,1)
+
     cpcs = np.expand_dims(cpcs,1)
-    #cpcs = np.vstack(cpcs)
+
+    recording_id = np.asarray(recording_id)
 
     # Make CV folds
     if verbose >= 1:
         print('Split the data into {} cross-validation folds'.format(num_folds))
     
-    skf = StratifiedKFold(n_splits=num_folds, random_state=None, shuffle=False)
-
-    # Train the models.
-    if verbose >= 1:
-        print('Training the Challenge models on the Challenge data...')
-
+    kf = KFold(n_splits=num_folds)
 
     challenge_score = np.zeros(num_folds)
     auroc_outcomes = np.zeros(num_folds)
@@ -213,35 +211,34 @@ def cross_validate_model(data_folder, num_folds, verbose):
     all_preds_outcome  = []
     all_labels_outcome  = []
 
-    for i, (train_index, test_index) in enumerate(skf.split(X_data, outcomes)): #TODO: Stratify based on bothe outcomes and cpcs
+    for i, (train_index, val_index) in enumerate(kf.split(np.unique(recording_id))): #TODO: Stratify based on bothe outcomes and cpcs
         print(f"Fold {i}:")
 
-        X_train, X_test = X_data[train_index], X_data[test_index]
-        outcomes_train, outcomes_test = outcomes[train_index], outcomes[test_index]
-        cpcs_train, cpcs_test = cpcs[train_index], cpcs[test_index]
+        train_id, val_id = np.unique(recording_id)[train_index], np.unique(recording_id)[val_index]
 
-        # Impute any missing features; use the mean value by default.
-        #imputer = SimpleImputer().fit(X_train)
+        train_indx = np.where(np.isin(recording_id,train_id))[0]
+        val_indx = np.where(np.isin(recording_id,val_id))[0]
 
-        # Train the models.
-        #X_train = imputer.transform(X_train)
+        X_train, X_val = X_data[train_indx], X_data[val_indx]
+        outcomes_train, outcomes_val = outcomes[train_indx], outcomes[val_indx]
+        cpcs_train, cpcs_val = cpcs[train_indx], cpcs[val_indx]
+
+        # Define the models.
+
         outcome_model = build_iception_model(X_data.shape[1:], outcomes.shape[1], outputfunc="sigmoid")
-        outcome_model.compile(loss=tf.keras.losses.BinaryCrossentropy(),optimizer=tf.keras.optimizers.Adam(learning_rate=0.00001), metrics=[
+        outcome_model.compile(loss=tf.keras.losses.BinaryCrossentropy(),optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), metrics=[
             tf.keras.metrics.AUC(num_thresholds=200,curve='ROC', summation_method='interpolation',name="ROC",multi_label=False),
             tf.keras.metrics.AUC(num_thresholds=200,curve='PR',summation_method='interpolation',name="PRC",multi_label=False)])
-        #outcome_model = RandomForestClassifier(
-        #    n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, outcomes_train.ravel())
+
         cpc_model = build_iception_model(X_data.shape[1:], cpcs.shape[1], outputfunc="linear")
-        cpc_model.compile(loss=tf.keras.losses.MeanSquaredError(),optimizer=tf.keras.optimizers.Adam(learning_rate=0.00001))
-        #cpc_model = RandomForestRegressor(
-        #    n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(X_train, cpcs_train.ravel())
+        cpc_model.compile(loss=tf.keras.losses.MeanSquaredError(),optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE))
 
         tf_cpcs_train = tf.data.Dataset.from_tensor_slices((X_train, cpcs_train)) 
         tf_cpcs_train = tf_cpcs_train.cache()
         tf_cpcs_train = tf_cpcs_train.batch(BATCH_SIZE)
         tf_cpcs_train = tf_cpcs_train.prefetch(tf.data.AUTOTUNE)
 
-        tf_cpcs_val = tf.data.Dataset.from_tensor_slices((X_test, cpcs_test))
+        tf_cpcs_val = tf.data.Dataset.from_tensor_slices((X_val, cpcs_val))
         tf_cpcs_val = tf_cpcs_val.cache()
         tf_cpcs_val = tf_cpcs_val.batch(BATCH_SIZE)
         tf_cpcs_val = tf_cpcs_val.prefetch(tf.data.AUTOTUNE)
@@ -251,44 +248,41 @@ def cross_validate_model(data_folder, num_folds, verbose):
         tf_outcome_train = tf_outcome_train.batch(BATCH_SIZE)
         tf_outcome_train = tf_outcome_train.prefetch(tf.data.AUTOTUNE)
 
-        tf_outcome_val = tf.data.Dataset.from_tensor_slices((X_test, outcomes_test))
+        tf_outcome_val = tf.data.Dataset.from_tensor_slices((X_val, outcomes_val))
         tf_outcome_val = tf_outcome_val.cache()
         tf_outcome_val = tf_outcome_val.batch(BATCH_SIZE)
         tf_outcome_val = tf_outcome_val.prefetch(tf.data.AUTOTUNE)
 
-        #cpc_model.fit(x=X_train, y=cpcs_train.ravel(), epochs=EPOCHS, batch_size=BATCH_SIZE)
-
+        # Train the models.
+        if verbose >= 1:
+            print('Training the Challenge models on the Challenge data...')
     
         outcome_model.fit(tf_outcome_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_outcome_val)
 
 
         cpc_model.fit(tf_cpcs_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_cpcs_val)
 
-        # Apply model on test fold
-        # Impute missing data.
-        #X_test = imputer.transform(X_test)
-
-        # Apply models to features.
-        outcome_hat_probability = outcome_model.predict(X_test)
+        # Apply model on validation fold
+        outcome_hat_probability = outcome_model.predict(X_val)
 
         outcome_hat = (outcome_hat_probability > 0.5)*1
         #print(f"outcome shape = {outcome_hat.shape}")
-        #outcome_hat_probability = np.expand_dims(outcome_model.predict_proba(X_test)[:,0],1)
+        #outcome_hat_probability = np.expand_dims(outcome_model.predict_proba(X_val)[:,0],1)
         #print(f"outcome_hat_probability shape = {outcome_hat_probability.shape}")
-        cpc_hat = cpc_model.predict(X_test)
+        cpc_hat = cpc_model.predict(X_val)
         #print(f"cpc_hat shape = {cpc_hat.shape}")
 
         # Ensure that the CPC score is between (or equal to) 1 and 5.
         cpc_hat = np.clip(cpc_hat, 1, 5)
         all_preds_outcome.append(outcome_hat_probability)
-        all_labels_outcome.append(outcomes_test)
+        all_labels_outcome.append(outcomes_val)
 
-        challenge_score[i] = compute_challenge_score(outcomes_test.ravel(),outcome_hat_probability.ravel())
-        auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_test.ravel(),outcome_hat_probability.ravel())
-        accuracy_outcomes[i], _, _  = compute_accuracy(outcomes_test.ravel(), outcome_hat.ravel())
-        f_measure_outcomes[i], _, _  = compute_f_measure(outcomes_test.ravel(), outcome_hat.ravel())
-        mse_cpcs[i] = compute_mse(cpcs_test.ravel(), cpc_hat.ravel())
-        mae_cpcs[i] = compute_mae(cpcs_test.ravel(), cpc_hat.ravel())
+        challenge_score[i] = compute_challenge_score(outcomes_val.ravel(),outcome_hat_probability.ravel())
+        auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_val.ravel(),outcome_hat_probability.ravel())
+        accuracy_outcomes[i], _, _  = compute_accuracy(outcomes_val.ravel(), outcome_hat.ravel())
+        f_measure_outcomes[i], _, _  = compute_f_measure(outcomes_val.ravel(), outcome_hat.ravel())
+        mse_cpcs[i] = compute_mse(cpcs_val.ravel(), cpc_hat.ravel())
+        mae_cpcs[i] = compute_mae(cpcs_val.ravel(), cpc_hat.ravel())
         print(f"challenge_score={challenge_score[i]},  auroc_outcomes={auroc_outcomes[i]}, auprc_outcomes={auprc_outcomes[i]},accuracy_outcomes={accuracy_outcomes[i]}, f_measure_outcomes={f_measure_outcomes[i]}, mse_cpcs={mse_cpcs[i]}, mae_cpcs={mae_cpcs[i]}")
     all_preds_outcome = np.asarray(all_preds_outcome)
     all_labels_outcome = np.asarray(all_labels_outcome)
