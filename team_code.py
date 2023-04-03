@@ -23,6 +23,7 @@ import tensorflow as tf
 from scipy import signal
 from typing import Generator
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+import coral_ordinal as coral
 ################################################################################
 #
 # Required functions. Edit these functions to add your code, but do not change the arguments of the functions.
@@ -153,7 +154,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
     patient_ids = find_data_folders(data_folder)
     num_patients = len(patient_ids)
-
+    patient_ids = np.asarray(patient_ids)
     if num_patients==0:
         raise FileNotFoundError('No data was provided.')
 
@@ -163,39 +164,6 @@ def cross_validate_model(data_folder, num_folds, verbose):
     # Extract the features and labels.
     if verbose >= 1:
         print('Extracting features and labels from the Challenge data...')
-
-    outcomes = list()
-    cpcs = list()
-    X_data = list()
-    recording_id = list()
-
-    for i in range(num_patients):
-        if verbose >= 2:
-            print('    {}/{}...'.format(i+1, num_patients))
-
-        # Load data.
-        patient_id = patient_ids[i]
-        patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
-
-        for rec in recording_data:
-            if rec[1] != None:
-                dwn_smp_rec = []
-                for lead in rec[0]:
-                    dwn_smp_rec.append(signal.resample(lead,SIGNAL_LEN//DIVISOR))
-                dwn_smp_rec = np.asarray(dwn_smp_rec)
-                outcomes.append(get_outcome(patient_metadata))
-                cpcs.append(get_cpc(patient_metadata))
-                X_data.append(dwn_smp_rec)
-                recording_id.append(get_patient_id(patient_metadata))
-
-    X_data = np.asarray(X_data)
-    X_data = np.moveaxis(X_data,1,-1)
-
-    outcomes = np.expand_dims(outcomes,1)
-
-    cpcs = np.expand_dims(cpcs,1)
-
-    recording_id = np.asarray(recording_id)
 
     # Make CV folds
     if verbose >= 1:
@@ -213,75 +181,49 @@ def cross_validate_model(data_folder, num_folds, verbose):
     all_preds_outcome  = []
     all_labels_outcome  = []
 
-    for i, (train_index, val_index) in enumerate(kf.split(np.unique(recording_id))): #TODO: Stratify based on bothe outcomes and cpcs
+    for i, (train_index, val_index) in enumerate(kf.split(patient_ids)): #TODO: Stratify based on bothe outcomes and cpcs
         print(f"Fold {i}:")
 
-        train_id, val_id = np.unique(recording_id)[train_index], np.unique(recording_id)[val_index]
+        train_ids, val_ids = patient_ids[train_index], patient_ids[val_index]
 
-        train_indx = np.where(np.isin(recording_id,train_id))[0]
-        val_indx = np.where(np.isin(recording_id,val_id))[0]
-
-        X_train, X_val = X_data[train_indx], X_data[val_indx]
-        outcomes_train, outcomes_val = outcomes[train_indx], outcomes[val_indx]
-        cpcs_train, cpcs_val = cpcs[train_indx], cpcs[val_indx]
+        train_filenames = get_valid_filenames_from_patient_ids(data_folder, train_ids)
+        val_filenames = get_valid_filenames_from_patient_ids(data_folder, val_ids)
 
         # Define the models.
 
-        outcome_model = build_iception_model(X_data.shape[1:], outcomes.shape[1], outputfunc="sigmoid")
-        outcome_model.compile(loss=tf.keras.losses.BinaryCrossentropy(),optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), metrics=[
-            tf.keras.metrics.AUC(num_thresholds=200,curve='ROC', summation_method='interpolation',name="ROC",multi_label=False),
-            tf.keras.metrics.AUC(num_thresholds=200,curve='PR',summation_method='interpolation',name="PRC",multi_label=False)])
+        cpc_model = build_iception_model((6000,18), 5)
+        cpc_model.compile(loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
-        cpc_model = build_iception_model(X_data.shape[1:], cpcs.shape[1], outputfunc="linear")
-        cpc_model.compile(loss=tf.keras.losses.MeanSquaredError(),optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE))
-
-        tf_cpcs_train = tf.data.Dataset.from_tensor_slices((X_train, cpcs_train)) 
-        tf_cpcs_train = tf_cpcs_train.cache()
-        tf_cpcs_train = tf_cpcs_train.batch(BATCH_SIZE)
-        tf_cpcs_train = tf_cpcs_train.prefetch(tf.data.AUTOTUNE)
-
-        tf_cpcs_val = tf.data.Dataset.from_tensor_slices((X_val, cpcs_val))
-        tf_cpcs_val = tf_cpcs_val.cache()
-        tf_cpcs_val = tf_cpcs_val.batch(BATCH_SIZE)
-        tf_cpcs_val = tf_cpcs_val.prefetch(tf.data.AUTOTUNE)
-
-        tf_outcome_train = tf.data.Dataset.from_tensor_slices((X_train, outcomes_train))  
-        tf_outcome_train = tf_outcome_train.cache()
-        tf_outcome_train = tf_outcome_train.batch(BATCH_SIZE)
-        tf_outcome_train = tf_outcome_train.prefetch(tf.data.AUTOTUNE)
-
-        tf_outcome_val = tf.data.Dataset.from_tensor_slices((X_val, outcomes_val))
-        tf_outcome_val = tf_outcome_val.cache()
-        tf_outcome_val = tf_outcome_val.batch(BATCH_SIZE)
-        tf_outcome_val = tf_outcome_val.prefetch(tf.data.AUTOTUNE)
 
         # Train the models.
         if verbose >= 1:
             print('Training the Challenge models on the Challenge data...')
     
-        outcome_model.fit(tf_outcome_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_outcome_val)
+        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, generate_data(data_folder, train_filenames)), epochs=EPOCHS, 
+                                              validation_data=batch_generator(batch_size=BATCH_SIZE, generate_data(data_folder, val_filenames)),
+                                              steps_per_epoch=len(train_filenames)/BATCH_SIZE, validation_steps=len(val_filenames)/BATCH_SIZE,validation_freq=1)
 
+        validation_generator = generate_data(data_folder, val_filenames)
 
-        cpc_model.fit(tf_cpcs_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_cpcs_val)
+        val_cpcs = []
+        outcomes_val = []
+        outcome_hat_probability = []
+        outcome_hat = []
+        for j in range(len(val_filenames)):
+            val_rec, val_cpc = next(validation_generator)
+            val_cpcs.append(val_cpc)
+            outcomes_val.append((val_cpc>3)*1)
+            current_prediction = cpc_model.predict(np.expand_dims(val_rec,0))
+            current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
+            current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
+            current_outcome_hat = (current_outcome_hat_probability > 0.5)*1
+            outcome_hat_probability.append(current_outcome_hat_probability)
+            outcome_hat.append(current_outcome_hat)
+        val_cpcs = np.asarray(val_cpcs)
+        outcomes_val = np.asarray(outcomes_val)
+        outcome_hat_probability = np.asarray(outcome_hat_probability)
+        outcome_hat = np.asarray(outcome_hat)
 
-        # Apply model on validation fold
-        outcome_hat_probability = outcome_model.predict(X_val)
-
-        outcome_hat = (outcome_hat_probability > 0.5)*1
-        #print(f"outcome shape = {outcome_hat.shape}")
-        #outcome_hat_probability = np.expand_dims(outcome_model.predict_proba(X_val)[:,0],1)
-        #print(f"outcome_hat_probability shape = {outcome_hat_probability.shape}")
-        cpc_hat = cpc_model.predict(X_val)
-        #print(f"cpc_hat shape = {cpc_hat.shape}")
-
-        # Uncomment to use regression as clf
-        #outcome_hat = (cpc_hat > 3)*1
-        #map_proba = map(map_regression_to_proba, cpc_hat)
-        #outcome_hat_probability = np.asarray(list(map_proba))
-        
-
-        # Ensure that the CPC score is between (or equal to) 1 and 5.
-        cpc_hat = np.clip(cpc_hat, 1, 5)
         all_preds_outcome.append(outcome_hat_probability)
         all_labels_outcome.append(outcomes_val)
 
@@ -289,13 +231,14 @@ def cross_validate_model(data_folder, num_folds, verbose):
         auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_val.ravel(),outcome_hat_probability.ravel())
         accuracy_outcomes[i], _, _  = compute_accuracy(outcomes_val.ravel(), outcome_hat.ravel())
         f_measure_outcomes[i], _, _  = compute_f_measure(outcomes_val.ravel(), outcome_hat.ravel())
-        mse_cpcs[i] = compute_mse(cpcs_val.ravel(), cpc_hat.ravel())
-        mae_cpcs[i] = compute_mae(cpcs_val.ravel(), cpc_hat.ravel())
+        #mse_cpcs[i] = compute_mse(cpcs_val.ravel(), cpc_hat.ravel())
+        mse_cpcs[i] = compute_challenge_score(outcomes_val.ravel(),outcome_hat_probability.ravel())
+        #mae_cpcs[i] = compute_mae(cpcs_val.ravel(), cpc_hat.ravel())
+        mae_cpcs[i] = compute_challenge_score(outcomes_val.ravel(),outcome_hat_probability.ravel())
         print(f"challenge_score={challenge_score[i]},  auroc_outcomes={auroc_outcomes[i]}, auprc_outcomes={auprc_outcomes[i]},accuracy_outcomes={accuracy_outcomes[i]}, f_measure_outcomes={f_measure_outcomes[i]}, mse_cpcs={mse_cpcs[i]}, mae_cpcs={mae_cpcs[i]}")
     all_preds_outcome = np.asarray(all_preds_outcome)
     all_labels_outcome = np.asarray(all_labels_outcome)
     return all_preds_outcome , all_labels_outcome , challenge_score, auroc_outcomes, auprc_outcomes, accuracy_outcomes, f_measure_outcomes, mse_cpcs, mae_cpcs
- 
 
 # Save your trained model.
 def save_challenge_model(model_folder, imputer, outcome_model, cpc_model):
@@ -441,9 +384,9 @@ def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr
             x = _shortcut_layer(input_res, x)
             input_res = x
 
-    gap_layer = tf.keras.layers.GlobalAveragePooling1D()(x)
-
-    output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
+    gap_layer = tf.keras.layers.GlobalAveragePooling1D()(x)     
+    output_layer = coral.CoralOrdinal(num_classes = 5)(gap_layer)
+    #output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
     model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
 
     print("Inception model built.")
@@ -475,72 +418,15 @@ def extract_signal(recording_metadata,recordings, task=4,time=30):
     return signal
 
 
-def shuffle_batch_generator_age(
-    batch_size: int,
-    gen_x: Generator,
-    gen_y: Generator,
-    num_leads: int,
-    samp_freq: int,
-    time: int,
-):
-    batch_features = np.zeros((batch_size, samp_freq * time, num_leads))
-    batch_labels_1 = np.zeros((batch_size, 1))
-
-    while True:
-        for i in range(batch_size):
-
-            batch_features[i] = next(gen_x)
-            batch_labels_1[i] = next(gen_y)
-
-        yield batch_features, batch_labels_1
-
-
-def generate_y_age(y_train: np.ndarray):
-    while True:
-        for i in y_train:
-            yield i
-
-
-def generate_X_age(X_train: np.ndarray, samp_freq: int, num_leads: int):
-    while True:
-        for h in X_train:
-            data, header_data = load_challenge_data(h)
-            if int(header_data[0].split(" ")[2]) != samp_freq:
-                data_new = np.ones(
-                    [
-                        num_leads,
-                        int(
-                            (
-                                int(header_data[0].split(" ")[3])
-                                / int(header_data[0].split(" ")[2])
-                            )
-                            * samp_freq
-                        ),
-                    ]
-                )
-                for i, j in enumerate(data):
-                    data_new[i] = signal.resample(
-                        j,
-                        int(
-                            (
-                                int(header_data[0].split(" ")[3])
-                                / int(header_data[0].split(" ")[2])
-                            )
-                            * samp_freq
-                        ),
-                    )
-                data = data_new
-                data = pad_sequences(
-                    data, maxlen=samp_freq * 10, truncating="post", padding="post"
-                )
-            data = np.moveaxis(data, 0, -1)
-            yield data
-
-
-
-
-
-
+def get_valid_filenames_from_patient_ids(data_folder, patient_ids):
+    filenames = []
+    for ids in patient_ids:
+        for filepath in os.listdir(os.path.join(data_folder,ids)):
+            if filepath.endswith(".mat"):
+                
+                filename = os.path.join(data_folder,ids,filepath.strip(".mat"))
+                filenames.append(filename)
+    return np.asarray(filenames)
 
 
 def batch_generator(batch_size: int, gen: Generator):
@@ -555,33 +441,16 @@ def batch_generator(batch_size: int, gen: Generator):
 
         yield np.asarray(batch_features), np.asarray(batch_labels)
 
-def generate_data(folder: str, patient_ids: list, label: str, rec_df:pd.DataFrame):
+def generate_data(folder: str, filenames, time=60):
     while True:
-        for roll_indx in range(72): 
-            for id in patient_ids:
-                indx = np.where(np.asarray(rec_df["Record"].str.split("_").to_list())[:,1] == id.split("_")[1])[0]
-                indx = np.roll(indx,-roll_indx)
-                row = rec_df.T.pop(indx[0])
-                rec_id = int(row["Record"].split("_")[-1])
-                patient_metadata, recording_metadata, recordings = load_challenge_data(folder, id)
-                X_data = []
-                if recordings[rec_id][1] != None:
-                    for recording in recordings[rec_id][0]:
-                        S = librosa.feature.melspectrogram(y=recording, sr=recordings[rec_id][1],n_mels=128,fmin=0,fmax=recordings[rec_id][1]/2.5,n_fft=256,hop_length=128)
-                        S_dB = librosa.power_to_db(S, ref=np.max)
-                        X_data.append(S_dB)
-                    X_data = np.asarray(X_data)
-                    X_data = np.moveaxis(X_data,0,-1)
-                    if label == "outcome":
-                        y_data = get_outcome(patient_metadata)
-                    elif label == "cpcs":
-                        indx  = get_cpc(patient_metadata)
-                        y_data = np.zeros(5)
-                        y_data[int(indx)-1] = 1
-                    else:
-                        print("wrong label")
-
-                    yield X_data, y_data
+        for filename in filenames:
+            patient_id = get_patient_id_from_path(filename)
+            patient_metadata, _, _ = load_challenge_data(folder, patient_id)
+            #current_outcome = get_outcome(patient_metadata)
+            current_cpc = get_cpc(patient_metadata)
+            recording_data, sampling_frequency, _ = load_recording(filename)
+            recording_data = np.moveaxis(recording_data,0,-1)[:int(time*sampling_frequency)]
+            yield recording_data, current_cpc
 
 def map_regression_to_proba(pred):
     new_pred = []
