@@ -199,8 +199,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
         if verbose >= 1:
             print('Training the Challenge models on the Challenge data...')
     
-        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, generate_data(data_folder, train_filenames)), epochs=EPOCHS, 
-                                              validation_data=batch_generator(batch_size=BATCH_SIZE, generate_data(data_folder, val_filenames)),
+        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, gen = generate_data(data_folder, train_filenames)), epochs=EPOCHS, 
+                                              validation_data=batch_generator(batch_size=BATCH_SIZE, gen = generate_data(data_folder, val_filenames)),
                                               steps_per_epoch=len(train_filenames)/BATCH_SIZE, validation_steps=len(val_filenames)/BATCH_SIZE,validation_freq=1)
 
         validation_generator = generate_data(data_folder, val_filenames)
@@ -459,3 +459,6 @@ def map_regression_to_proba(pred):
     elif pred > 3:
         new_pred = 0.5 + (pred-3) / 4
     return new_pred
+
+def get_patient_id_from_path(path):
+    return path.split("/")[-1].split("\\")[0]
