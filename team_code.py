@@ -21,6 +21,7 @@ from sklearn.model_selection import KFold
 import joblib
 import tensorflow as tf
 from scipy import signal
+import coral_ordinal as coral
 ################################################################################
 #
 # Required functions. Edit these functions to add your code, but do not change the arguments of the functions.
@@ -143,7 +144,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
     SIGNAL_LEN = 30000 # samples
     DIVISOR = 10
     BATCH_SIZE = 30
-    EPOCHS = 15
+    EPOCHS = 30
     LEARNING_RATE = 0.00001
 
     if verbose >= 1:
@@ -193,6 +194,9 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
     cpcs = np.expand_dims(cpcs,1)
 
+    # For ordinal regression only:
+    cpcs = cpcs - 1
+
     recording_id = np.asarray(recording_id)
 
     # Make CV folds
@@ -225,14 +229,14 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
         # Define the models.
 
-        outcome_model = build_iception_model(X_data.shape[1:], outcomes.shape[1], outputfunc="sigmoid")
-        outcome_model.compile(loss=tf.keras.losses.BinaryCrossentropy(),optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), metrics=[
-            tf.keras.metrics.AUC(num_thresholds=200,curve='ROC', summation_method='interpolation',name="ROC",multi_label=False),
-            tf.keras.metrics.AUC(num_thresholds=200,curve='PR',summation_method='interpolation',name="PRC",multi_label=False)])
+        #outcome_model = build_iception_model(X_data.shape[1:], outcomes.shape[1], outputfunc="sigmoid")
+        #outcome_model.compile(loss=tf.keras.losses.BinaryCrossentropy(),optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE), metrics=[
+        #    tf.keras.metrics.AUC(num_thresholds=200,curve='ROC', summation_method='interpolation',name="ROC",multi_label=False),
+        #    tf.keras.metrics.AUC(num_thresholds=200,curve='PR',summation_method='interpolation',name="PRC",multi_label=False)])
 
         cpc_model = build_iception_model(X_data.shape[1:], cpcs.shape[1], outputfunc="linear")
-        cpc_model.compile(loss=tf.keras.losses.MeanSquaredError(),optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE))
-
+        #cpc_model.compile(loss=tf.keras.losses.MeanSquaredError(),optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE))
+        cpc_model.compile(loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
         tf_cpcs_train = tf.data.Dataset.from_tensor_slices((X_train, cpcs_train)) 
         tf_cpcs_train = tf_cpcs_train.cache()
         tf_cpcs_train = tf_cpcs_train.batch(BATCH_SIZE)
@@ -257,23 +261,35 @@ def cross_validate_model(data_folder, num_folds, verbose):
         if verbose >= 1:
             print('Training the Challenge models on the Challenge data...')
     
-        outcome_model.fit(tf_outcome_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_outcome_val)
+        #outcome_model.fit(tf_outcome_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_outcome_val)
 
 
         cpc_model.fit(tf_cpcs_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=tf_cpcs_val)
 
         # Apply model on validation fold
-        outcome_hat_probability = outcome_model.predict(X_val)
+        #outcome_hat_probability = outcome_model.predict(X_val)
 
-        outcome_hat = (outcome_hat_probability > 0.5)*1
+        #outcome_hat = (outcome_hat_probability > 0.5)*1
         #print(f"outcome shape = {outcome_hat.shape}")
         #outcome_hat_probability = np.expand_dims(outcome_model.predict_proba(X_val)[:,0],1)
         #print(f"outcome_hat_probability shape = {outcome_hat_probability.shape}")
         cpc_hat = cpc_model.predict(X_val)
+
+        # Convert from logits to label probabilities. This is initially a tensorflow tensor.
+        cpc_hat = np.asarray(coral.ordinal_softmax(cpc_hat))
+
         #print(f"cpc_hat shape = {cpc_hat.shape}")
 
         # Ensure that the CPC score is between (or equal to) 1 and 5.
-        cpc_hat = np.clip(cpc_hat, 1, 5)
+        #cpc_hat = np.clip(cpc_hat, 1, 5)
+        #outcome_hat = (cpc_hat > 3)*1
+
+        #map_proba = map(map_regression_to_proba, cpc_hat)
+        #outcome_hat_probability = np.asarray(list(map_proba))
+
+        outcome_hat_probability = cpc_hat[:,3:].sum(axis=1)
+        outcome_hat = (outcome_hat_probability > 0.5)*1
+        
         all_preds_outcome.append(outcome_hat_probability)
         all_labels_outcome.append(outcomes_val)
 
@@ -281,8 +297,10 @@ def cross_validate_model(data_folder, num_folds, verbose):
         auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_val.ravel(),outcome_hat_probability.ravel())
         accuracy_outcomes[i], _, _  = compute_accuracy(outcomes_val.ravel(), outcome_hat.ravel())
         f_measure_outcomes[i], _, _  = compute_f_measure(outcomes_val.ravel(), outcome_hat.ravel())
-        mse_cpcs[i] = compute_mse(cpcs_val.ravel(), cpc_hat.ravel())
-        mae_cpcs[i] = compute_mae(cpcs_val.ravel(), cpc_hat.ravel())
+        #mse_cpcs[i] = compute_mse(cpcs_val.ravel(), cpc_hat.ravel())
+        mse_cpcs[i] = compute_challenge_score(outcomes_val.ravel(),outcome_hat_probability.ravel())
+        #mae_cpcs[i] = compute_mae(cpcs_val.ravel(), cpc_hat.ravel())
+        mae_cpcs[i] = compute_challenge_score(outcomes_val.ravel(),outcome_hat_probability.ravel())
         print(f"challenge_score={challenge_score[i]},  auroc_outcomes={auroc_outcomes[i]}, auprc_outcomes={auprc_outcomes[i]},accuracy_outcomes={accuracy_outcomes[i]}, f_measure_outcomes={f_measure_outcomes[i]}, mse_cpcs={mse_cpcs[i]}, mae_cpcs={mae_cpcs[i]}")
     all_preds_outcome = np.asarray(all_preds_outcome)
     all_labels_outcome = np.asarray(all_labels_outcome)
@@ -434,8 +452,8 @@ def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr
             input_res = x
 
     gap_layer = tf.keras.layers.GlobalAveragePooling1D()(x)
-
-    output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
+    output_layer = coral.CoralOrdinal(num_classes = 5)(gap_layer)
+    #output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
     model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
 
     print("Inception model built.")
@@ -465,3 +483,11 @@ def extract_signal(recording_metadata,recordings, task=4,time=30):
     indx = get_signal_indx(recording_metadata, task)
     signal = get_best_signal(recordings,indx, time)
     return signal
+
+def map_regression_to_proba(pred):
+    new_pred = []
+    if pred <= 3:
+        new_pred = pred / 6
+    elif pred > 3:
+        new_pred = 0.5 + (pred-3) / 4
+    return new_pred
