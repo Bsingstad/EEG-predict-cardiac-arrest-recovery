@@ -21,6 +21,8 @@ from sklearn.model_selection import KFold
 import joblib
 import tensorflow as tf
 from scipy import signal
+from typing import Generator
+from tensorflow.keras.preprocessing.sequence import pad_sequences
 ################################################################################
 #
 # Required functions. Edit these functions to add your code, but do not change the arguments of the functions.
@@ -272,6 +274,12 @@ def cross_validate_model(data_folder, num_folds, verbose):
         cpc_hat = cpc_model.predict(X_val)
         #print(f"cpc_hat shape = {cpc_hat.shape}")
 
+        # Uncomment to use regression as clf
+        #outcome_hat = (cpc_hat > 3)*1
+        #map_proba = map(map_regression_to_proba, cpc_hat)
+        #outcome_hat_probability = np.asarray(list(map_proba))
+        
+
         # Ensure that the CPC score is between (or equal to) 1 and 5.
         cpc_hat = np.clip(cpc_hat, 1, 5)
         all_preds_outcome.append(outcome_hat_probability)
@@ -465,3 +473,120 @@ def extract_signal(recording_metadata,recordings, task=4,time=30):
     indx = get_signal_indx(recording_metadata, task)
     signal = get_best_signal(recordings,indx, time)
     return signal
+
+
+def shuffle_batch_generator_age(
+    batch_size: int,
+    gen_x: Generator,
+    gen_y: Generator,
+    num_leads: int,
+    samp_freq: int,
+    time: int,
+):
+    batch_features = np.zeros((batch_size, samp_freq * time, num_leads))
+    batch_labels_1 = np.zeros((batch_size, 1))
+
+    while True:
+        for i in range(batch_size):
+
+            batch_features[i] = next(gen_x)
+            batch_labels_1[i] = next(gen_y)
+
+        yield batch_features, batch_labels_1
+
+
+def generate_y_age(y_train: np.ndarray):
+    while True:
+        for i in y_train:
+            yield i
+
+
+def generate_X_age(X_train: np.ndarray, samp_freq: int, num_leads: int):
+    while True:
+        for h in X_train:
+            data, header_data = load_challenge_data(h)
+            if int(header_data[0].split(" ")[2]) != samp_freq:
+                data_new = np.ones(
+                    [
+                        num_leads,
+                        int(
+                            (
+                                int(header_data[0].split(" ")[3])
+                                / int(header_data[0].split(" ")[2])
+                            )
+                            * samp_freq
+                        ),
+                    ]
+                )
+                for i, j in enumerate(data):
+                    data_new[i] = signal.resample(
+                        j,
+                        int(
+                            (
+                                int(header_data[0].split(" ")[3])
+                                / int(header_data[0].split(" ")[2])
+                            )
+                            * samp_freq
+                        ),
+                    )
+                data = data_new
+                data = pad_sequences(
+                    data, maxlen=samp_freq * 10, truncating="post", padding="post"
+                )
+            data = np.moveaxis(data, 0, -1)
+            yield data
+
+
+
+
+
+
+
+
+def batch_generator(batch_size: int, gen: Generator):
+    batch_features = []
+    batch_labels = []
+
+    while True:
+        for i in range(batch_size):
+            X_temp, y_temp = next(gen)
+            batch_features.append(X_temp)
+            batch_labels.append(y_temp)
+
+        yield np.asarray(batch_features), np.asarray(batch_labels)
+
+def generate_data(folder: str, patient_ids: list, label: str, rec_df:pd.DataFrame):
+    while True:
+        for roll_indx in range(72): 
+            for id in patient_ids:
+                indx = np.where(np.asarray(rec_df["Record"].str.split("_").to_list())[:,1] == id.split("_")[1])[0]
+                indx = np.roll(indx,-roll_indx)
+                row = rec_df.T.pop(indx[0])
+                rec_id = int(row["Record"].split("_")[-1])
+                patient_metadata, recording_metadata, recordings = load_challenge_data(folder, id)
+                X_data = []
+                if recordings[rec_id][1] != None:
+                    for recording in recordings[rec_id][0]:
+                        S = librosa.feature.melspectrogram(y=recording, sr=recordings[rec_id][1],n_mels=128,fmin=0,fmax=recordings[rec_id][1]/2.5,n_fft=256,hop_length=128)
+                        S_dB = librosa.power_to_db(S, ref=np.max)
+                        X_data.append(S_dB)
+                    X_data = np.asarray(X_data)
+                    X_data = np.moveaxis(X_data,0,-1)
+                    if label == "outcome":
+                        y_data = get_outcome(patient_metadata)
+                    elif label == "cpcs":
+                        indx  = get_cpc(patient_metadata)
+                        y_data = np.zeros(5)
+                        y_data[int(indx)-1] = 1
+                    else:
+                        print("wrong label")
+
+                    yield X_data, y_data
+
+def map_regression_to_proba(pred):
+    new_pred = []
+    if pred <= 3:
+        new_pred = pred / 6
+    elif pred > 3:
+        new_pred = 0.5 + (pred-3) / 4
+    return new_pred
