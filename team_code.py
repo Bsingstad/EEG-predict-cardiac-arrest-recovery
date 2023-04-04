@@ -12,6 +12,7 @@
 from helper_code import *
 from evaluate_model import *
 import numpy as np, os, sys
+import random
 import pandas as pd
 from io import StringIO
 import mne
@@ -145,7 +146,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
     SIGNAL_LEN = 30000 # samples
     DIVISOR = 10
-    BATCH_SIZE = 30
+    BATCH_SIZE = 20
     EPOCHS = 15
     LEARNING_RATE = 0.00001
 
@@ -189,9 +190,13 @@ def cross_validate_model(data_folder, num_folds, verbose):
         train_filenames = get_valid_filenames_from_patient_ids(data_folder, train_ids)
         val_filenames = get_valid_filenames_from_patient_ids(data_folder, val_ids)
 
+        # Random shuffle filenames to avoid all signals from on person ending up in the same batch
+        train_filenames = random.shuffle(train_filenames)
+        val_filenames = random.shuffle(val_filenames)
+
         # Define the models.
 
-        cpc_model = build_iception_model((6000,18), 5)
+        cpc_model = build_iception_model((30000,18), 5)
         cpc_model.compile(loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
 
@@ -430,18 +435,16 @@ def get_valid_filenames_from_patient_ids(data_folder, patient_ids):
 
 
 def batch_generator(batch_size: int, gen: Generator):
-    batch_features = []
-    batch_labels = []
+    batch_features = np.zeros((batch_size, 30000, 18))
+    batch_labels = np.zeros((batch_size, 1))
 
     while True:
         for i in range(batch_size):
-            X_temp, y_temp = next(gen)
-            batch_features.append(X_temp)
-            batch_labels.append(y_temp)
+            batch_features[i], batch_labels[i] = next(gen)
+        yield batch_features, batch_labels
 
-        yield np.asarray(batch_features), np.asarray(batch_labels)
 
-def generate_data(folder: str, filenames, time=60):
+def generate_data(folder: str, filenames, time=300):
     while True:
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
@@ -461,4 +464,9 @@ def map_regression_to_proba(pred):
     return new_pred
 
 def get_patient_id_from_path(path):
-    return path.split("/")[-1].split("\\")[0]
+    return path.split("/")[-2]
+
+def unison_shuffled_copies(a, b):
+    assert len(a) == len(b)
+    p = np.random.permutation(len(a))
+    return a[p], b[p]
