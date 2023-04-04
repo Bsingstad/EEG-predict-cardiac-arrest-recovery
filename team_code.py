@@ -145,9 +145,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
 
     SIGNAL_LEN = 30000 # samples
-    TIME = 300
     BATCH_SIZE = 20
-    EPOCHS = 1
+    EPOCHS = 5
     LEARNING_RATE = 0.00001
 
     if verbose >= 1:
@@ -204,8 +203,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
         if verbose >= 1:
             print('Training the Challenge models on the Challenge data...')
     
-        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, train_filenames, time=TIME)), epochs=EPOCHS, 
-                                              validation_data=batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, val_filenames, time=TIME)),
+        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, train_filenames)), epochs=EPOCHS, 
+                                              validation_data=batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, val_filenames)),
                                               steps_per_epoch=len(train_filenames)/BATCH_SIZE, validation_steps=len(val_filenames)/BATCH_SIZE,validation_freq=1)
 
         print('Test model on validation data...')
@@ -242,8 +241,6 @@ def cross_validate_model(data_folder, num_folds, verbose):
         val_prediction.to_csv("prediction_fold_{}.csv".format(i))
 
         val_outcome = np.nanmean(val_prediction.iloc[:,4:],axis=1)
-        val_outcome = np.nan_to_num(val_outcome, nan=0.5)
-
 
         val_cpc = val_outcome * 5
         val_cpc = np.nan_to_num(val_cpc, nan=2.5)
@@ -461,7 +458,7 @@ def batch_generator(batch_size: int, gen: Generator, signal_len:int):
         yield batch_features, batch_labels
 
 
-def generate_data(folder: str, filenames, time:int = 300):
+def generate_data(folder: str, filenames, time=300):
     while True:
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
@@ -488,7 +485,7 @@ def map_proba_to_regression(pred):
         new_pred = 0.5 + (pred-3) / 4
     return new_pred
 
-def get_patient_id_from_path(path,location = "local"):
+def get_patient_id_from_path(path,location = "colab"):
     if location == "colab":
         return path.split("/")[-2]
     elif location == "local":
