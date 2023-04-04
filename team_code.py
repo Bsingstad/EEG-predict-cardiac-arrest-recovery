@@ -145,9 +145,8 @@ def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
 
     SIGNAL_LEN = 30000 # samples
-    DIVISOR = 10
     BATCH_SIZE = 20
-    EPOCHS = 15
+    EPOCHS = 1
     LEARNING_RATE = 0.00001
 
     if verbose >= 1:
@@ -191,55 +190,70 @@ def cross_validate_model(data_folder, num_folds, verbose):
         val_filenames = get_valid_filenames_from_patient_ids(data_folder, val_ids)
 
         # Random shuffle filenames to avoid all signals from on person ending up in the same batch
-        train_filenames = random.shuffle(train_filenames)
-        val_filenames = random.shuffle(val_filenames)
+        random.shuffle(train_filenames)
+        random.shuffle(val_filenames)
 
         # Define the models.
 
-        cpc_model = build_iception_model((30000,18), 5)
-        cpc_model.compile(loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
+        cpc_model = build_iception_model((SIGNAL_LEN,18), 5)
+        cpc_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
 
         # Train the models.
         if verbose >= 1:
             print('Training the Challenge models on the Challenge data...')
     
-        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, gen = generate_data(data_folder, train_filenames)), epochs=EPOCHS, 
-                                              validation_data=batch_generator(batch_size=BATCH_SIZE, gen = generate_data(data_folder, val_filenames)),
+        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, train_filenames)), epochs=EPOCHS, 
+                                              validation_data=batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, val_filenames)),
                                               steps_per_epoch=len(train_filenames)/BATCH_SIZE, validation_steps=len(val_filenames)/BATCH_SIZE,validation_freq=1)
 
-        validation_generator = generate_data(data_folder, val_filenames)
+        print('Test model on validation data...')
+        val_prediction = []
+        for j in range(len(val_ids)):
+            if verbose >= 2:
+                print('    {}/{}...'.format(j+1, len(val_ids)))
 
-        val_cpcs = []
-        outcomes_val = []
-        outcome_hat_probability = []
-        outcome_hat = []
-        for j in range(len(val_filenames)):
-            val_rec, val_cpc = next(validation_generator)
-            val_cpcs.append(val_cpc)
-            outcomes_val.append((val_cpc>3)*1)
-            current_prediction = cpc_model.predict(np.expand_dims(val_rec,0))
-            current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
-            current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
-            current_outcome_hat = (current_outcome_hat_probability > 0.5)*1
-            outcome_hat_probability.append(current_outcome_hat_probability)
-            outcome_hat.append(current_outcome_hat)
-        val_cpcs = np.asarray(val_cpcs)
-        outcomes_val = np.asarray(outcomes_val)
-        outcome_hat_probability = np.asarray(outcome_hat_probability)
-        outcome_hat = np.asarray(outcome_hat)
+            # Load data.
+            patient_id = val_ids[j]
+            patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
 
-        all_preds_outcome.append(outcome_hat_probability)
-        all_labels_outcome.append(outcomes_val)
+            patient_pred = []
+            patient_pred.append(patient_id)
+            patient_pred.append(get_outcome(patient_metadata))
+            patient_pred.append(get_cpc(patient_metadata))    
+            for val_recording in recording_data:
+                if val_recording[1] == None:
+                    patient_pred.append(np.nan)
+                else:
+                    current_recording = val_recording[0]
+                    current_recording = np.moveaxis(current_recording,0,-1)
+                    current_prediction = cpc_model.predict(np.expand_dims(current_recording[:SIGNAL_LEN],0))
+                    current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
+                    current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
+                    #current_outcome_hat = (current_outcome_hat_probability > 0.5)*1
+                    patient_pred.append(current_outcome_hat_probability)
+                    #outcome_hat.append(current_outcome_hat)
+            val_prediction.append(patient_pred)
+        val_prediction = np.asarray(val_prediction) 
+        val_prediction = pd.DataFrame(val_prediction)
+        val_prediction.iloc[:,1:3] = val_prediction.iloc[:,1:3].astype("int")
+        val_prediction.iloc[:,3:] = val_prediction.iloc[:,3:].astype("float")
+        val_prediction.to_csv("prediction_fold_{}.csv".format(i))
 
-        challenge_score[i] = compute_challenge_score(outcomes_val.ravel(),outcome_hat_probability.ravel())
-        auroc_outcomes[i], auprc_outcomes[i] = compute_auc(outcomes_val.ravel(),outcome_hat_probability.ravel())
-        accuracy_outcomes[i], _, _  = compute_accuracy(outcomes_val.ravel(), outcome_hat.ravel())
-        f_measure_outcomes[i], _, _  = compute_f_measure(outcomes_val.ravel(), outcome_hat.ravel())
-        #mse_cpcs[i] = compute_mse(cpcs_val.ravel(), cpc_hat.ravel())
-        mse_cpcs[i] = compute_challenge_score(outcomes_val.ravel(),outcome_hat_probability.ravel())
-        #mae_cpcs[i] = compute_mae(cpcs_val.ravel(), cpc_hat.ravel())
-        mae_cpcs[i] = compute_challenge_score(outcomes_val.ravel(),outcome_hat_probability.ravel())
+        val_outcome = np.nanmean(val_prediction.iloc[:,4:],axis=1)
+
+        val_cpc = val_outcome * 5
+        val_cpc = np.nan_to_num(val_cpc, nan=2.5)
+
+        # Ensure that the CPC score is between (or equal to) 1 and 5.
+        val_cpc = np.clip(val_cpc, 1, 5)
+
+        challenge_score[i] = compute_challenge_score(val_prediction.iloc[:,1],val_outcome)
+        auroc_outcomes[i], auprc_outcomes[i] = compute_auc(val_prediction.iloc[:,1],val_outcome)
+        accuracy_outcomes[i], _, _  = compute_accuracy(val_prediction.iloc[:,1],val_outcome)
+        f_measure_outcomes[i], _, _  = compute_f_measure(val_prediction.iloc[:,1],val_outcome)
+        mse_cpcs[i] = compute_mse(val_prediction.iloc[:,2],val_cpc)
+        mae_cpcs[i] = compute_mae(val_prediction.iloc[:,2],val_cpc)
         print(f"challenge_score={challenge_score[i]},  auroc_outcomes={auroc_outcomes[i]}, auprc_outcomes={auprc_outcomes[i]},accuracy_outcomes={accuracy_outcomes[i]}, f_measure_outcomes={f_measure_outcomes[i]}, mse_cpcs={mse_cpcs[i]}, mae_cpcs={mae_cpcs[i]}")
     all_preds_outcome = np.asarray(all_preds_outcome)
     all_labels_outcome = np.asarray(all_labels_outcome)
@@ -434,8 +448,8 @@ def get_valid_filenames_from_patient_ids(data_folder, patient_ids):
     return np.asarray(filenames)
 
 
-def batch_generator(batch_size: int, gen: Generator):
-    batch_features = np.zeros((batch_size, 30000, 18))
+def batch_generator(batch_size: int, gen: Generator, signal_len:int):
+    batch_features = np.zeros((batch_size, signal_len, 18))
     batch_labels = np.zeros((batch_size, 1))
 
     while True:
@@ -444,7 +458,7 @@ def batch_generator(batch_size: int, gen: Generator):
         yield batch_features, batch_labels
 
 
-def generate_data(folder: str, filenames, time=300):
+def generate_data(folder: str, filenames, time=15):
     while True:
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
@@ -463,8 +477,19 @@ def map_regression_to_proba(pred):
         new_pred = 0.5 + (pred-3) / 4
     return new_pred
 
-def get_patient_id_from_path(path):
-    return path.split("/")[-2]
+def map_proba_to_regression(pred):
+    new_pred = []
+    if pred <= 3:
+        new_pred = pred / 6
+    elif pred > 3:
+        new_pred = 0.5 + (pred-3) / 4
+    return new_pred
+
+def get_patient_id_from_path(path,location = "local"):
+    if location == "colab":
+        return path.split("/")[-2]
+    elif location == "local":
+        return path.split("/")[-1].split("\\")[0]
 
 def unison_shuffled_copies(a, b):
     assert len(a) == len(b)
