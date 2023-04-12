@@ -393,7 +393,7 @@ def map_proba_to_regression(pred):
         new_pred = 0.5 + (pred-3) / 4
     return new_pred
 
-def get_patient_id_from_path(path,location = "local"):
+def get_patient_id_from_path(path,location = "colab"):
     if location == "colab":
         return path.split("/")[-2]
     elif location == "local":
