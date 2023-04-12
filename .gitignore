@@ -2,3 +2,5 @@ kaggle.json
 training_subset/
 __pycache__/
 outputs/*
+models/*
+*.csv
