@@ -232,6 +232,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
         val_cpc = np.nan_to_num(val_cpc, nan=2.5)
 
         # Ensure that the CPC score is between (or equal to) 1 and 5.
+
         val_cpc = np.clip(val_cpc, 1, 5)
 
         challenge_score[i] = compute_challenge_score(val_prediction.iloc[:,1],val_outcome)
@@ -240,6 +241,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
         f_measure_outcomes[i], _, _  = compute_f_measure(val_prediction.iloc[:,1],val_outcome)
         mse_cpcs[i] = compute_mse(val_prediction.iloc[:,2],val_cpc)
         mae_cpcs[i] = compute_mae(val_prediction.iloc[:,2],val_cpc)
+
         print(f"challenge_score={challenge_score[i]},  auroc_outcomes={auroc_outcomes[i]}, auprc_outcomes={auprc_outcomes[i]},accuracy_outcomes={accuracy_outcomes[i]}, f_measure_outcomes={f_measure_outcomes[i]}, mse_cpcs={mse_cpcs[i]}, mae_cpcs={mae_cpcs[i]}")
     all_preds_outcome = np.asarray(all_preds_outcome)
     all_labels_outcome = np.asarray(all_labels_outcome)
