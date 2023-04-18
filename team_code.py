@@ -110,6 +110,9 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     patient_pred = np.asarray(patient_pred)
 
     outcome_probability = np.nanmean(patient_pred)
+    if np.isnan(outcome_probability) == True:
+        # If all probas = nan --> set = 0.5 +- 0.005
+        outcome_probability = 0.5 + random.random()/100 -0.005
     outcome = int((outcome_probability > 0.5) * 1)
 
 
