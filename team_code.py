@@ -31,9 +31,9 @@ import coral_ordinal as coral
 def train_challenge_model(data_folder, model_folder, verbose):
     
     SIGNAL_LEN = 30000 # samples
-    BATCH_SIZE = 20
+    BATCH_SIZE = 30
     EPOCHS = 10
-    LEARNING_RATE = 0.00001
+    LEARNING_RATE = 0.001
     # Find data files.
     if verbose >= 1:
         print('Finding the Challenge data...')
