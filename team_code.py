@@ -32,7 +32,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     
     SIGNAL_LEN = 30000 # samples
     BATCH_SIZE = 20
-    EPOCHS = 8
+    EPOCHS = 5
     LEARNING_RATE = 0.00001
     # Find data files.
     if verbose >= 1:
