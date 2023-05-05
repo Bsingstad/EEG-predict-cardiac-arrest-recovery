@@ -196,6 +196,24 @@ def cross_validate_model(data_folder, num_folds, verbose):
                                               validation_data=batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, val_filenames,samples=SIGNAL_LEN)),
                                               steps_per_epoch=len(train_filenames)/BATCH_SIZE, validation_steps=len(val_filenames)/BATCH_SIZE,validation_freq=1)
 
+
+        cpc_backbone = delete_last_layer(cpc_model)
+
+        for k in range(len(train_ids)):
+            if verbose >= 2:
+                print('    {}/{}...'.format(j+1, len(val_ids)))
+            patient_id = train_ids[j]
+            patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
+            for val_recording in recording_data:
+                if val_recording[1] == None:
+                    patient_pred.append(np.nan)
+                else:
+                    current_recording = val_recording[0]
+                    current_recording = np.moveaxis(current_recording,0,-1)
+                    current_prediction = cpc_model.predict(np.expand_dims(current_recording[:SIGNAL_LEN],0))
+
+
+
         print('Test model on validation data...')
         val_prediction = []
         for j in range(len(val_ids)):
@@ -314,7 +332,7 @@ def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr
             x = _shortcut_layer(input_res, x)
             input_res = x
 
-    gap_layer = tf.keras.layers.GlobalAveragePooling1D()(x)     
+    gap_layer = tf.keras.layers.GlobalAveragePooling1D(name="feature_vector")(x)     
     output_layer = coral.CoralOrdinal(num_classes = 5)(gap_layer)
     #output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
     model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
@@ -406,3 +424,13 @@ def unison_shuffled_copies(a, b):
     assert len(a) == len(b)
     p = np.random.permutation(len(a))
     return a[p], b[p]
+
+
+def delete_last_layer(model, layer_name):
+    """
+    Take the model and return the same model without the last layer
+    """
+    new_model = tf.keras.models.Model(
+    [model.inputs], [model.get_layer(layer_name).output, model.output]
+)
+    return new_model
