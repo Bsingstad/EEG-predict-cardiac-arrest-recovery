@@ -30,7 +30,7 @@ import coral_ordinal as coral
 # Train your model.
 def train_challenge_model(data_folder, model_folder, verbose):
     
-    SIGNAL_LEN = 30000 # samples
+    SIGNAL_LEN = 60 # sec
     BATCH_SIZE = 20
     EPOCHS = 5
     LEARNING_RATE = 0.00001
@@ -52,7 +52,6 @@ def train_challenge_model(data_folder, model_folder, verbose):
     # Get data filenames.
     if verbose >= 1:
         print('Get valid filenames...')
-
     filenames = get_valid_filenames_from_patient_ids(data_folder, patient_ids)
     random.shuffle(filenames)
 
@@ -67,7 +66,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     if verbose >= 1:
         print('Training the Challenge models on the Challenge data...')
 
-    cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, filenames,samples=SIGNAL_LEN)), 
+    cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, filenames,seconds=SIGNAL_LEN)), 
                   epochs=EPOCHS, steps_per_epoch=len(filenames)/BATCH_SIZE, verbose=verbose)
 
     # Save the models.
@@ -79,8 +78,9 @@ def train_challenge_model(data_folder, model_folder, verbose):
 # Load your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
 # arguments of this function.
 def load_challenge_models(model_folder, verbose):
-    SIGNAL_LEN = 30000 # samples
-    model = build_iception_model((SIGNAL_LEN,18), 5)
+    SIGNAL_LEN = 60 
+    SAMPLE_FREQ = 100 # seconds
+    model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,18), 5)
     filename = os.path.join(model_folder, 'model_weights.h5')
     model.load_weights(filename)
     if verbose >= 1:
@@ -91,22 +91,34 @@ def load_challenge_models(model_folder, verbose):
 # Run your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
 # arguments of this function.
 def run_challenge_models(models, data_folder, patient_id, verbose):
-    SIGNAL_LEN = 30000 # samples
+    SIGNAL_LEN = 60 # sec
 
     # Load data.
-    patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
+    #patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
+    patient_metadata = load_challenge_data(data_folder, patient_id)
+    recording_ids = find_recording_files(data_folder, patient_id)
 
-    patient_pred = [] 
-    for recording in recording_data:
-        if recording[1] == None:
-            patient_pred.append(np.nan)
-        else:
-            current_recording = recording[0]
-            current_recording = np.moveaxis(current_recording,0,-1)
-            current_prediction = models.predict(np.expand_dims(current_recording[:SIGNAL_LEN],0))
-            current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
-            current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
-            patient_pred.append(current_outcome_hat_probability)
+    #patient_ids = find_data_folders(data_folder)
+    patient_pred = []
+    for recording_id in recording_ids:
+        try:
+            temp_recording_data, _, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_id + "_EEG"))
+            if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
+                recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
+            elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
+                diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
+                recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
+            recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
+            recording_data = np.moveaxis(recording_data,0,-1)
+            recording_data = scipy.signal.resample(recording_data, int((100/sampling_frequency)*recording_data.shape[0]), axis=1)
+            recording_data = recording_data[:6000,:18] # stygg hardkoding her
+        except:
+            recording_data = np.zeros((6000,18))
+        #print(recording_data.shape)
+        current_prediction = models.predict(np.expand_dims(recording_data,0))
+        current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
+        current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
+        patient_pred.append(current_outcome_hat_probability)
     patient_pred = np.asarray(patient_pred)
 
     outcome_probability = np.nanmean(patient_pred)
@@ -141,6 +153,10 @@ def cross_validate_model(data_folder, num_folds, verbose):
     BATCH_SIZE = 20
     EPOCHS = 5
     LEARNING_RATE = 0.00001
+
+    BATCH_SIZE_LSTM = 30
+    EPOCHS_LSTM = 20
+    LEARNING_RATE_LSTM = 0.0001
 
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -192,12 +208,46 @@ def cross_validate_model(data_folder, num_folds, verbose):
         if verbose >= 1:
             print('Training the Challenge models on the Challenge data...')
     
-        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, train_filenames,samples=SIGNAL_LEN)), epochs=EPOCHS, 
-                                              validation_data=batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, val_filenames,samples=SIGNAL_LEN)),
+        cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, train_filenames,seconds=SIGNAL_LEN)), epochs=EPOCHS, 
+                                              validation_data=batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, val_filenames,seconds=SIGNAL_LEN)),
                                               steps_per_epoch=len(train_filenames)/BATCH_SIZE, validation_steps=len(val_filenames)/BATCH_SIZE,validation_freq=1)
 
+
+        cnn_backbone = delete_last_layer(cpc_model)
+
+        cnn_feature_vectors = np.zeros((len(train_ids),72, 128,1))
+        cpc_train = np.zeros((len(train_ids),1))
+
+        for k in range(len(train_ids)):
+            if verbose >= 2:
+                print('    {}/{}...'.format(k+1, len(train_ids)))
+            
+            patient_id = train_ids[j]
+            patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
+            cpc_train[k,:] = get_cpc(patient_metadata)
+            for hour, val_recording in enumerate(recording_data):
+                if val_recording[1] == None:
+                    continue
+                    #cnn_feature_vectors[k,hour,:,0] = np.zeros(128)
+                else:
+                    current_recording = val_recording[0]
+                    current_recording = np.moveaxis(current_recording,0,-1)
+                    current_prediction = cnn_backbone.predict(np.expand_dims(current_recording[:SIGNAL_LEN],0))
+                    cnn_feature_vectors[k,hour,:,0] = current_prediction
+        
+
+  
+
+        reccurent_model = td_lstm_model()
+        reccurent_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE_LSTM), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
+        
+        reccurent_model.fit(x=cnn_feature_vectors, y=cpc_train, epochs=EPOCHS_LSTM, batch_size=BATCH_SIZE_LSTM)
+        
+
+
+
         print('Test model on validation data...')
-        val_prediction = []
+        all_predictions = []
         for j in range(len(val_ids)):
             if verbose >= 2:
                 print('    {}/{}...'.format(j+1, len(val_ids)))
@@ -205,30 +255,31 @@ def cross_validate_model(data_folder, num_folds, verbose):
             # Load data.
             patient_id = val_ids[j]
             patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
-
+            feature_vectors = np.zeros((72,128))
             patient_pred = []
             patient_pred.append(patient_id)
             patient_pred.append(get_outcome(patient_metadata))
             patient_pred.append(get_cpc(patient_metadata))    
-            for val_recording in recording_data:
+            for rec_num, val_recording in enumerate(recording_data):
                 if val_recording[1] == None:
-                    patient_pred.append(np.nan)
+                    continue
                 else:
                     current_recording = val_recording[0]
                     current_recording = np.moveaxis(current_recording,0,-1)
-                    current_prediction = cpc_model.predict(np.expand_dims(current_recording[:SIGNAL_LEN],0))
-                    current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
-                    current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
-                    #current_outcome_hat = (current_outcome_hat_probability > 0.5)*1
-                    patient_pred.append(current_outcome_hat_probability)
-                    #outcome_hat.append(current_outcome_hat)
-            val_prediction.append(patient_pred)
-        val_prediction = np.asarray(val_prediction) 
-        val_prediction = pd.DataFrame(val_prediction)
-        val_prediction.iloc[:,1:3] = val_prediction.iloc[:,1:3].astype("int")
-        val_prediction.iloc[:,3:] = val_prediction.iloc[:,3:].astype("float")
-        val_prediction.to_csv("prediction_fold_{}.csv".format(i))
+                    feature_vectors[rec_num,:] = cnn_backbone.predict(np.expand_dims(current_recording[:SIGNAL_LEN],0))
+            current_prediction = reccurent_model.predict(np.expand_dims(feature_vectors,0))
+            current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
+            #current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
+            #current_outcome_hat = (current_outcome_hat_probability > 0.5)*1
+            patient_pred.append(current_prediction)
+            all_predictions.append(patient_pred)
 
+        all_predictions = np.asarray(all_predictions) 
+        all_predictions = pd.DataFrame(all_predictions)
+        all_predictions.iloc[:,1:3] = all_predictions.iloc[:,1:3].astype("int")
+        all_predictions.iloc[:,3:] = all_predictions.iloc[:,3:].astype("float")
+        all_predictions.to_csv("prediction_fold_{}.csv".format(i))
+        #FIXME: 
         val_outcome = np.nanmean(val_prediction.iloc[:,4:],axis=1)
 
         val_cpc = val_outcome * 5
@@ -314,7 +365,7 @@ def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr
             x = _shortcut_layer(input_res, x)
             input_res = x
 
-    gap_layer = tf.keras.layers.GlobalAveragePooling1D()(x)     
+    gap_layer = tf.keras.layers.GlobalAveragePooling1D(name="feature_vector")(x)     
     output_layer = coral.CoralOrdinal(num_classes = 5)(gap_layer)
     #output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
     model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
@@ -342,6 +393,10 @@ def get_best_signal(recordings,indx, time):
     truncated_signal = signal[:,:time*int(sample_freq)]
     return truncated_signal
 
+def padarray(A, size):
+    t = size - A.shape[1]
+    return np.pad(A, pad_width=(0, t), mode='constant')
+
 def extract_signal(recording_metadata,recordings, task=4,time=30):
     indx = get_signal_indx(recording_metadata, task)
     signal = get_best_signal(recordings,indx, time)
@@ -350,17 +405,16 @@ def extract_signal(recording_metadata,recordings, task=4,time=30):
 
 def get_valid_filenames_from_patient_ids(data_folder, patient_ids):
     filenames = []
-    for ids in patient_ids:
-        for filepath in os.listdir(os.path.join(data_folder,ids)):
-            if filepath.endswith(".mat"):
-                
-                filename = os.path.join(data_folder,ids,filepath.strip(".mat"))
-                filenames.append(filename)
+    for patient_id in patient_ids:
+        recording_ids = find_recording_files(data_folder, patient_id)
+        for recording_id in recording_ids:
+            filename = os.path.join(data_folder,patient_id,recording_id + "_EEG")
+            filenames.append(filename)
     return np.asarray(filenames)
 
 
 def batch_generator(batch_size: int, gen: Generator, signal_len:int):
-    batch_features = np.zeros((batch_size, signal_len, 18))
+    batch_features = np.zeros((batch_size, signal_len*100, 18))
     batch_labels = np.zeros((batch_size, 1))
 
     while True:
@@ -369,15 +423,27 @@ def batch_generator(batch_size: int, gen: Generator, signal_len:int):
         yield batch_features, batch_labels
 
 
-def generate_data(folder: str, filenames, samples):
+def generate_data(folder: str, filenames, seconds):
     while True:
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
-            patient_metadata, _, _ = load_challenge_data(folder, patient_id)
+            patient_metadata = load_challenge_data(folder, patient_id)
             #current_outcome = get_outcome(patient_metadata)
             current_cpc = get_cpc(patient_metadata)
-            recording_data, sampling_frequency, _ = load_recording(filename)
-            recording_data = np.moveaxis(recording_data,0,-1)[:int(samples)]
+            try:
+                temp_recording_data, _, sampling_frequency = load_recording_data(filename)
+                if temp_recording_data.shape[1] > int(seconds*sampling_frequency):
+                    recording_data = temp_recording_data[:,:int(seconds*sampling_frequency)]
+                elif temp_recording_data.shape[1] <= int(seconds*sampling_frequency):
+                    diff = int(seconds*sampling_frequency) - temp_recording_data.shape[1]
+                    recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                recording_data = np.moveaxis(recording_data,0,-1)
+                recording_data = scipy.signal.resample(recording_data, int((100/sampling_frequency)*recording_data.shape[0]), axis=0)
+                recording_data = recording_data[:6000,:18] # stygg hardkoding her
+            except:
+                recording_data = np.zeros((6000,18))
             yield recording_data, current_cpc
 
 def map_regression_to_proba(pred):
@@ -406,3 +472,50 @@ def unison_shuffled_copies(a, b):
     assert len(a) == len(b)
     p = np.random.permutation(len(a))
     return a[p], b[p]
+
+def raw_to_bipolar(raw_data):
+    ## Bipolar reference
+    bipolar_data = np.zeros((18,raw_data.shape[1]))
+    bipolar_data[8,:] = raw_data[0,:] - raw_data[1,:]; # Fp1-F3
+    bipolar_data[9,:] = raw_data[1,:] - raw_data[2,:]; # F3-C3
+    bipolar_data[10,:] = raw_data[2,:] - raw_data[3,:]; # C3-P3
+    bipolar_data[11,:] = raw_data[3,:] - raw_data[7,:]; # P3-O1
+
+    bipolar_data[12,:] = raw_data[11,:] - raw_data[12,:]; # Fp2-F4
+    bipolar_data[13,:] = raw_data[12,:] - raw_data[13,:]; # F4-C4
+    bipolar_data[14,:] = raw_data[13,:] - raw_data[14,:]; # C4-P4
+    bipolar_data[15,:] = raw_data[14,:] - raw_data[18,:]; # P4-O2
+
+    bipolar_data[0,:] = raw_data[0,:] - raw_data[4,:];  # Fp1-F7
+    bipolar_data[1,:] = raw_data[4,:] - raw_data[5,:]; # F7-T3
+    bipolar_data[2,:] = raw_data[5,:] - raw_data[6,:]; # T3-T5
+    bipolar_data[3,:] = raw_data[6,:] - raw_data[7,:]; # T5-O1
+
+    bipolar_data[4,:] = raw_data[11,:] - raw_data[15,:]; # Fp2-F8
+    bipolar_data[5,:] = raw_data[15,:] - raw_data[16,:]; # F8-T4
+    bipolar_data[6,:] = raw_data[16,:] - raw_data[17,:]; # T4-T6
+    bipolar_data[7,:] = raw_data[17,:] - raw_data[18,:]; # T6-O2
+
+    bipolar_data[16,:] = raw_data[8,:] - raw_data[9,:];   # Fz-Cz
+    bipolar_data[17,:] = raw_data[9,:] - raw_data[10,:]; # Cz-Pz
+    return bipolar_data
+
+
+def delete_last_layer(model, layer_name):
+    """
+    Take the model and return the same model without the last layer
+    """
+    new_model = tf.keras.models.Model(
+    [model.inputs], [model.get_layer(layer_name).output]
+)
+    return new_model
+
+def td_lstm_model():
+    model = tf.keras.models.Sequential()
+    model.add(
+        tf.keras.layers.LSTM(128, activation='relu', return_sequences=False)
+    )
+    model.add(tf.keras.layers.LSTM(72, activation='relu')
+    )
+    model.add(coral.CoralOrdinal(num_classes = 5))
+    return model
