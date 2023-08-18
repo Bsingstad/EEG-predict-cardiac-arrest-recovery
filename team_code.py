@@ -30,9 +30,10 @@ import coral_ordinal as coral
 # Train your model.
 def train_challenge_model(data_folder, model_folder, verbose):
     
-    SIGNAL_LEN = 60 # sec
+    SIGNAL_LEN = 300 # sec
+    FREQ = 100
     BATCH_SIZE = 20
-    EPOCHS = 5
+    EPOCHS = 10
     LEARNING_RATE = 0.00001
     # Find data files.
     if verbose >= 1:
@@ -59,7 +60,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     if verbose >= 1:
         print('Building models...')
 
-    cpc_model = build_iception_model((SIGNAL_LEN,18), 5)
+    cpc_model = build_iception_model((SIGNAL_LEN*FREQ,18), 5)
     cpc_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
     # Train the models.
@@ -78,7 +79,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
 # Load your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
 # arguments of this function.
 def load_challenge_models(model_folder, verbose):
-    SIGNAL_LEN = 60 
+    SIGNAL_LEN = 300 
     SAMPLE_FREQ = 100 # seconds
     model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,18), 5)
     filename = os.path.join(model_folder, 'model_weights.h5')
@@ -91,8 +92,8 @@ def load_challenge_models(model_folder, verbose):
 # Run your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
 # arguments of this function.
 def run_challenge_models(models, data_folder, patient_id, verbose):
-    SIGNAL_LEN = 60 # sec
-
+    SIGNAL_LEN = 300 # sec
+    FREQ = 100
     # Load data.
     #patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
     patient_metadata = load_challenge_data(data_folder, patient_id)
@@ -110,10 +111,10 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
                 recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
             recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
             recording_data = np.moveaxis(recording_data,0,-1)
-            recording_data = scipy.signal.resample(recording_data, int((100/sampling_frequency)*recording_data.shape[0]), axis=1)
-            recording_data = recording_data[:6000,:18] # stygg hardkoding her
+            recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=1)
+            recording_data = recording_data[:SIGNAL_LEN*FREQ,:18] # stygg hardkoding her
         except:
-            recording_data = np.zeros((6000,18))
+            recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
         #print(recording_data.shape)
         current_prediction = models.predict(np.expand_dims(recording_data,0))
         current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
@@ -414,7 +415,8 @@ def get_valid_filenames_from_patient_ids(data_folder, patient_ids):
 
 
 def batch_generator(batch_size: int, gen: Generator, signal_len:int):
-    batch_features = np.zeros((batch_size, signal_len*100, 18))
+    FREQ = 100
+    batch_features = np.zeros((batch_size, signal_len*FREQ, 18))
     batch_labels = np.zeros((batch_size, 1))
 
     while True:
@@ -424,6 +426,8 @@ def batch_generator(batch_size: int, gen: Generator, signal_len:int):
 
 
 def generate_data(folder: str, filenames, seconds):
+    FREQ = 100
+    SIGNAL_LEN = 300
     while True:
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
@@ -440,10 +444,10 @@ def generate_data(folder: str, filenames, seconds):
 
                 recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
                 recording_data = np.moveaxis(recording_data,0,-1)
-                recording_data = scipy.signal.resample(recording_data, int((100/sampling_frequency)*recording_data.shape[0]), axis=0)
-                recording_data = recording_data[:6000,:18] # stygg hardkoding her
+                recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
+                recording_data = recording_data[:FREQ*SIGNAL_LEN,:18] # stygg hardkoding her
             except:
-                recording_data = np.zeros((6000,18))
+                recording_data = np.zeros((FREQ*SIGNAL_LEN,18))
             yield recording_data, current_cpc
 
 def map_regression_to_proba(pred):
