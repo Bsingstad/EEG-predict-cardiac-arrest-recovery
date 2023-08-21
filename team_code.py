@@ -33,8 +33,10 @@ def train_challenge_model(data_folder, model_folder, verbose):
     SIGNAL_LEN = 300 # sec
     FREQ = 100
     BATCH_SIZE = 20
-    EPOCHS = 10
+    EPOCHS = 1
     LEARNING_RATE = 0.00001
+    LSTM_EPOCHS = 20
+    LSTM_BS = 30
     # Find data files.
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -69,7 +71,61 @@ def train_challenge_model(data_folder, model_folder, verbose):
 
     cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, filenames,seconds=SIGNAL_LEN)), 
                   epochs=EPOCHS, steps_per_epoch=len(filenames)/BATCH_SIZE, verbose=verbose)
+    
+    cnn_backbone = delete_last_layer(cpc_model, "feature_vector")
+    reccurent_model = td_lstm_model()
+    reccurent_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
+    
+    cnn_features = np.zeros((num_patients,72,128))
+    lstm_labels = np.zeros((num_patients,1))
+
+    
+    for patient_num, patient_id in enumerate(patient_ids):
+        recording_ids = np.asarray(find_recording_files(data_folder, patient_id))
+        patient_metadata = load_challenge_data(data_folder, patient_id)
+        lstm_labels[patient_num,:] = get_cpc(patient_metadata)
+        cnt = 0
+        for i in range(72):
+            rec_num = int(recording_ids[cnt].split("_")[-1])
+            if i == rec_num:
+                try:
+                    temp_recording_data, _, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_ids[cnt] + "_EEG"))
+                    if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
+                        recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
+                    elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
+                        diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
+                        recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
+                    recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
+                    recording_data = np.moveaxis(recording_data,0,-1)
+                    recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=1)
+                    recording_data = recording_data[:SIGNAL_LEN*FREQ,:18] # stygg hardkoding her
+                except:
+                    recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
+                cnt += len(np.where(np.char.endswith(recording_ids,str(rec_num).zfill(3)))[0])
+            else:
+                recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
+            cnn_features[patient_num,cnt,:] = cnn_backbone(np.expand_dims(recording_data,0))
+
+    reccurent_model.fit(x=cnn_features,y=lstm_labels,batch_size=LSTM_BS,epochs=LSTM_EPOCHS,verbose=verbose)
+
+    mem_incept = tf.keras.models.Sequential()
+    mem_incept.add(tf.keras.layers.TimeDistributed(cnn_backbone, input_shape=(72, SIGNAL_LEN,18)))
+    mem_incept.add(reccurent_model)
+    mem_incept.add(coral.CoralOrdinal(num_classes = 5))
+    mem_incept.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
+
+
+
+
+
+    #memory_inception = tf.keras.models.Sequential()
+    #memory_inception.add(
+    #tf.keras.layers.TimeDistributed(cnn_backbone, input_shape=(10, SIGNAL_LEN,18)))
+    #memory_inception.add(tf.keras.layers.LSTM(128, activation='relu', return_sequences=True))
+    #memory_inception.add(tf.keras.layers.LSTM(72, activation='relu', return_sequences=False))
+    #memory_inception.add(coral.CoralOrdinal(num_classes = 5))
+    #memory_inception.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = 0.0001), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
     # Save the models.
     save_challenge_model(model_folder, cpc_model)
 
@@ -517,9 +573,9 @@ def delete_last_layer(model, layer_name):
 def td_lstm_model():
     model = tf.keras.models.Sequential()
     model.add(
-        tf.keras.layers.LSTM(128, activation='relu', return_sequences=False)
+        tf.keras.layers.LSTM(128, activation='relu', return_sequences=True)
     )
-    model.add(tf.keras.layers.LSTM(72, activation='relu')
+    model.add(tf.keras.layers.LSTM(72, activation='relu', return_sequences=False)
     )
     model.add(coral.CoralOrdinal(num_classes = 5))
     return model
