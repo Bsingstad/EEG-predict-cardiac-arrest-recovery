@@ -111,7 +111,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
                 recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
             recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
             recording_data = np.moveaxis(recording_data,0,-1)
-            recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=1)
+            recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
             recording_data = recording_data[:SIGNAL_LEN*FREQ,:18] # stygg hardkoding her
         except:
             recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
