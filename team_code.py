@@ -33,9 +33,9 @@ def train_challenge_model(data_folder, model_folder, verbose):
     SIGNAL_LEN = 300 # sec
     FREQ = 100
     BATCH_SIZE = 20
-    EPOCHS = 1
+    EPOCHS = 5
     LEARNING_RATE = 0.00001
-    LSTM_EPOCHS = 20
+    LSTM_EPOCHS = 50
     LSTM_BS = 30
     # Find data files.
     if verbose >= 1:
@@ -80,41 +80,49 @@ def train_challenge_model(data_folder, model_folder, verbose):
     cnn_features = np.zeros((num_patients,72,128))
     lstm_labels = np.zeros((num_patients,1))
 
-    
+        # Train the models.
+    if verbose >= 1:
+        print('Training the LSTM model on the Challenge data...')
+
+
     for patient_num, patient_id in enumerate(patient_ids):
+        print("Patient {}".format(patient_num))
         recording_ids = np.asarray(find_recording_files(data_folder, patient_id))
         patient_metadata = load_challenge_data(data_folder, patient_id)
         lstm_labels[patient_num,:] = get_cpc(patient_metadata)
         cnt = 0
         for i in range(72):
-            rec_num = int(recording_ids[cnt].split("_")[-1])
-            if i == rec_num:
-                try:
-                    temp_recording_data, _, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_ids[cnt] + "_EEG"))
-                    if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
-                        recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
-                    elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
-                        diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
-                        recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
-                    recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
-                    recording_data = np.moveaxis(recording_data,0,-1)
-                    recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=1)
-                    recording_data = recording_data[:SIGNAL_LEN*FREQ,:18] # stygg hardkoding her
-                except:
+            if cnt < len(recording_ids):
+                rec_num = int(recording_ids[cnt].split("_")[-1])
+                if i == rec_num:
+                    try:
+                        temp_recording_data, _, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_ids[cnt] + "_EEG"))
+                        if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
+                            recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
+                        elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
+                            diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
+                            recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
+                        recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
+                        recording_data = np.moveaxis(recording_data,0,-1)
+                        recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
+                        recording_data = recording_data[:SIGNAL_LEN*FREQ,:18] # stygg hardkoding her
+                    except:
+                        recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
+                    cnt += len(np.where(np.char.endswith(recording_ids,str(rec_num).zfill(3)))[0])
+                else:
                     recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
-                cnt += len(np.where(np.char.endswith(recording_ids,str(rec_num).zfill(3)))[0])
+                cnn_features[patient_num,i,:] = cnn_backbone(np.expand_dims(recording_data,0))
             else:
-                recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
-            cnn_features[patient_num,cnt,:] = cnn_backbone(np.expand_dims(recording_data,0))
+                break
 
     reccurent_model.fit(x=cnn_features,y=lstm_labels,batch_size=LSTM_BS,epochs=LSTM_EPOCHS,verbose=verbose)
 
-    mem_incept = tf.keras.models.Sequential()
-    mem_incept.add(tf.keras.layers.TimeDistributed(cnn_backbone, input_shape=(72, SIGNAL_LEN,18)))
-    mem_incept.add(reccurent_model)
-    mem_incept.add(coral.CoralOrdinal(num_classes = 5))
-    mem_incept.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
-
+    #mem_incept = tf.keras.models.Sequential()
+    #mem_incept.add(tf.keras.layers.TimeDistributed(cnn_backbone, input_shape=(72, SIGNAL_LEN * FREQ,18)))
+    #mem_incept.add(reccurent_model)
+    #mem_incept.add(coral.CoralOrdinal(num_classes = 5))
+    #mem_incept.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
+    mem_incept = join_models(cnn_backbone,reccurent_model)
 
 
 
@@ -127,7 +135,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     #memory_inception.add(coral.CoralOrdinal(num_classes = 5))
     #memory_inception.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = 0.0001), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
     # Save the models.
-    save_challenge_model(model_folder, cpc_model)
+    save_challenge_model(model_folder, mem_incept)
 
     if verbose >= 1:
         print('Done.')
@@ -137,12 +145,16 @@ def train_challenge_model(data_folder, model_folder, verbose):
 def load_challenge_models(model_folder, verbose):
     SIGNAL_LEN = 300 
     SAMPLE_FREQ = 100 # seconds
-    model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,18), 5)
+    cnn_model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,18), 5)
+    cnn_backbone = delete_last_layer(cnn_model, "feature_vector")
+    reccurent_model = td_lstm_model()
+
+    mem_incept = join_models(cnn_backbone,reccurent_model)
     filename = os.path.join(model_folder, 'model_weights.h5')
-    model.load_weights(filename)
+    mem_incept.load_weights(filename)
     if verbose >= 1:
         print('Model loaded...')
-    return model
+    return mem_incept
 
 
 # Run your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
@@ -155,36 +167,36 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     patient_metadata = load_challenge_data(data_folder, patient_id)
     recording_ids = find_recording_files(data_folder, patient_id)
 
-    #patient_ids = find_data_folders(data_folder)
-    patient_pred = []
-    for recording_id in recording_ids:
-        try:
-            temp_recording_data, _, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_id + "_EEG"))
-            if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
-                recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
-            elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
-                diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
-                recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
-            recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
-            recording_data = np.moveaxis(recording_data,0,-1)
-            recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=1)
-            recording_data = recording_data[:SIGNAL_LEN*FREQ,:18] # stygg hardkoding her
-        except:
-            recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
-        #print(recording_data.shape)
-        current_prediction = models.predict(np.expand_dims(recording_data,0))
-        current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
-        current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
-        patient_pred.append(current_outcome_hat_probability)
-    patient_pred = np.asarray(patient_pred)
 
-    outcome_probability = np.nanmean(patient_pred)
-    if np.isnan(outcome_probability) == True:
-        # If all probas = nan --> set = 0.5 +- 0.005
-        outcome_probability = 0.5 + random.random()/100 -0.005
+    recordings = np.zeros((72,30000,18))
+
+    for rec_num, recording_id in enumerate(recording_ids):
+        hour = int(recording_id.split("_")[-1])
+        if hour > 71:
+            break
+        if np.all(recordings[hour,:,:]) == False:
+            try:
+                temp_recording_data, _, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_id + "_EEG"))
+                if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
+                    recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
+                elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
+                    diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
+                    recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
+                recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
+                recording_data = np.moveaxis(recording_data,0,-1)
+                recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
+                recording_data = recording_data[:SIGNAL_LEN*FREQ,:18] # stygg hardkoding her
+                recordings[hour,:,:] = recording_data
+            except:
+                continue
+        else:
+            continue
+
+    current_prediction = models.predict(np.expand_dims(recordings,0))
+    current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
+    outcome_probability = current_prediction[:,3:].sum(axis=1)
     outcome = int((outcome_probability > 0.5) * 1)
-
-
+    
     cpc = (outcome_probability * 4) + 1
     cpc = np.nan_to_num(cpc, nan=3.0)
 
@@ -570,12 +582,19 @@ def delete_last_layer(model, layer_name):
 )
     return new_model
 
+def join_models(cnn,lstm):
+    inputs = tf.keras.Input(shape=(72,30000,18))
+    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,18))(inputs)
+    out = lstm(x)
+    model = tf.keras.models.Model(inputs=inputs, outputs=out)
+    return model
+
 def td_lstm_model():
     model = tf.keras.models.Sequential()
     model.add(
-        tf.keras.layers.LSTM(128, activation='relu', return_sequences=True)
+        tf.keras.layers.LSTM(128, return_sequences=True)
     )
-    model.add(tf.keras.layers.LSTM(72, activation='relu', return_sequences=False)
+    model.add(tf.keras.layers.LSTM(72, return_sequences=False)
     )
     model.add(coral.CoralOrdinal(num_classes = 5))
     return model
