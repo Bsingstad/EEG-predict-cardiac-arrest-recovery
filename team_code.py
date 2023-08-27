@@ -119,7 +119,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
                 cnn_features[patient_num,i,:] = cnn_backbone(np.expand_dims(recording_data,0))
             else:
                 break
-
+    patient_features = clean_tabular_data(patient_features)
     reccurent_model.fit(x=[cnn_features,patient_features],y=lstm_labels,batch_size=LSTM_BS,epochs=LSTM_EPOCHS,verbose=verbose)
 
 
@@ -177,6 +177,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     patient_metadata = load_challenge_data(data_folder, patient_id)
     recording_ids = find_recording_files(data_folder, patient_id)
     patient_features = get_patient_features(patient_metadata)
+    patient_features = np.nan_to_num(patient_features, nan=0)
 
 
     recordings = np.zeros((72,SIGNAL_LEN*FREQ,len(LEADS)))
@@ -709,3 +710,25 @@ def get_patient_features(data):
     features = np.array((age, female, male, other, rosc, ohca, shockable_rhythm, ttm))
 
     return features
+
+def nan_to_mean(arr):
+    if arr.all():
+        return np.zeros((len(arr)))
+    else:
+        mean = np.nanmean(arr)
+        return np.nan_to_num(arr,nan=mean)
+
+def nan_to_median(arr):
+    if arr.all():
+        return np.zeros((len(arr)))
+    else:
+        median = np.nanmedian(arr)
+        return np.nan_to_num(arr,nan=median)
+
+def clean_tabular_data(data):
+    data[:,0] = nan_to_mean(data[:,0])
+    data[:,4] = nan_to_mean(data[:,4])
+    data[:,5] = nan_to_median(data[:,5])
+    data[:,6] = nan_to_median(data[:,6])
+    data[:,7] = nan_to_median(data[:,7])
+    return data
