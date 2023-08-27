@@ -75,12 +75,13 @@ def train_challenge_model(data_folder, model_folder, verbose):
                   epochs=EPOCHS, steps_per_epoch=len(filenames)/BATCH_SIZE, verbose=verbose)
     
     cnn_backbone = delete_last_layer(cpc_model, "feature_vector")
-    reccurent_model = td_lstm_model()
+    reccurent_model = lstm_dnn_model()
     reccurent_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
     
     cnn_features = np.zeros((num_patients,72,128))
     lstm_labels = np.zeros((num_patients,1))
+    patient_features = np.zeros((num_patients,8))
 
     # Train the models.
     if verbose >= 1:
@@ -91,6 +92,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
         print("Patient {}".format(patient_num))
         recording_ids = np.asarray(find_recording_files(data_folder, patient_id))
         patient_metadata = load_challenge_data(data_folder, patient_id)
+        patient_features[patient_num,:] = get_patient_features(patient_metadata)
         lstm_labels[patient_num,:] = get_cpc(patient_metadata)
         cnt = 0
         for i in range(72):
@@ -118,15 +120,16 @@ def train_challenge_model(data_folder, model_folder, verbose):
             else:
                 break
 
-    reccurent_model.fit(x=cnn_features,y=lstm_labels,batch_size=LSTM_BS,epochs=LSTM_EPOCHS,verbose=verbose)
+    reccurent_model.fit(x=[cnn_features,patient_features],y=lstm_labels,batch_size=LSTM_BS,epochs=LSTM_EPOCHS,verbose=verbose)
+
 
     #mem_incept = tf.keras.models.Sequential()
     #mem_incept.add(tf.keras.layers.TimeDistributed(cnn_backbone, input_shape=(72, SIGNAL_LEN * FREQ,18)))
     #mem_incept.add(reccurent_model)
     #mem_incept.add(coral.CoralOrdinal(num_classes = 5))
     #mem_incept.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
-    mem_incept = join_models(cnn_backbone,reccurent_model)
-
+    #mem_incept = join_models(cnn_backbone,reccurent_model)
+    mem_incept = join_models_2(cnn_backbone,reccurent_model)
 
 
 
@@ -152,9 +155,10 @@ def load_challenge_models(model_folder, verbose):
     NUM_CLASS = 5
     cnn_model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,len(LEADS)), NUM_CLASS)
     cnn_backbone = delete_last_layer(cnn_model, "feature_vector")
-    reccurent_model = td_lstm_model()
+    #reccurent_model = td_lstm_model()
+    reccurent_model = lstm_dnn_model()
 
-    mem_incept = join_models(cnn_backbone,reccurent_model)
+    mem_incept = join_models_2(cnn_backbone,reccurent_model)
     filename = os.path.join(model_folder, 'model_weights.h5')
     mem_incept.load_weights(filename)
     if verbose >= 1:
@@ -172,6 +176,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     #patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
     patient_metadata = load_challenge_data(data_folder, patient_id)
     recording_ids = find_recording_files(data_folder, patient_id)
+    patient_features = get_patient_features(patient_metadata)
 
 
     recordings = np.zeros((72,SIGNAL_LEN*FREQ,len(LEADS)))
@@ -199,7 +204,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
         else:
             continue
 
-    current_prediction = models.predict(np.expand_dims(recordings,0))
+    current_prediction = models.predict([np.expand_dims(recordings,0),np.expand_dims(patient_features,0)])
     current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
     outcome_probability = current_prediction[:,3:].sum(axis=1)
     outcome = int((outcome_probability > 0.5) * 1)
@@ -633,6 +638,38 @@ def td_lstm_model():
     model.add(coral.CoralOrdinal(num_classes = 5))
     return model
 
+def demo_net():
+    inputs = tf.keras.Input(shape=(8,))
+    x = tf.keras.layers.Dense(32)(inputs)
+    output_layer = coral.CoralOrdinal(num_classes = 5)(x) 
+    model = tf.keras.models.Model(inputs=inputs, outputs=output_layer)
+    return model
+
+def lstm_dnn_model():
+    inputs_1 = tf.keras.Input(shape=(72,128))
+    inputs_2 = tf.keras.Input(shape=(8,))
+    lstm1 =  tf.keras.layers.LSTM(128, return_sequences=True)(inputs_1)
+    lstm2 = tf.keras.layers.LSTM(72, return_sequences=False)(lstm1)
+    
+    mod1 = tf.keras.models.Model(inputs=inputs_1, outputs=lstm2)
+    
+    dense = tf.keras.layers.Dense(8,name="feature_vector")(inputs_2)
+    
+    mod2 = tf.keras.models.Model(inputs=inputs_2, outputs=dense)
+    combined = tf.keras.layers.concatenate([mod1.output, mod2.output])
+    
+    output = coral.CoralOrdinal(num_classes = 5)(combined)
+    model = tf.keras.models.Model(inputs=[mod1.input, mod2.input], outputs=output)
+    return model
+
+def join_models_2(cnn,lstm):
+    inputs1 = tf.keras.Input(shape=(72,30000,22))
+    inputs2 = tf.keras.Input(shape=(8,))
+    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,22))(inputs1)
+    out = lstm([x,inputs2])
+    model = tf.keras.models.Model(inputs=[inputs1,inputs2], outputs=out)
+    return model
+
 def add_and_restructure_eeg_leads(reference_leads, current_leads, signal):
     missing_elements = [element for element in reference_leads if element not in current_leads]
     num_missing = len(missing_elements)
@@ -646,3 +683,29 @@ def add_and_restructure_eeg_leads(reference_leads, current_leads, signal):
     new_signal = new_signal[:,np.argsort(indices)]
     
     return new_signal
+
+def get_patient_features(data):
+    age = get_age(data)
+    sex = get_sex(data)
+    rosc = get_rosc(data)
+    ohca = get_ohca(data)
+    shockable_rhythm = get_shockable_rhythm(data)
+    ttm = get_ttm(data)
+
+    sex_features = np.zeros(2, dtype=int)
+    if sex == 'Female':
+        female = 1
+        male   = 0
+        other  = 0
+    elif sex == 'Male':
+        female = 0
+        male   = 1
+        other  = 0
+    else:
+        female = 0
+        male   = 0
+        other  = 1
+
+    features = np.array((age, female, male, other, rosc, ohca, shockable_rhythm, ttm))
+
+    return features
