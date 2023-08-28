@@ -33,8 +33,12 @@ def train_challenge_model(data_folder, model_folder, verbose):
     SIGNAL_LEN = 300 # sec
     FREQ = 100
     BATCH_SIZE = 20
-    EPOCHS = 5
+    EPOCHS = 7
     LEARNING_RATE = 0.00001
+    LSTM_EPOCHS = 50
+    LSTM_BS = 20
+    LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
+    NUM_CLASS = 5
     # Find data files.
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -60,7 +64,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     if verbose >= 1:
         print('Building models...')
 
-    cpc_model = build_iception_model((SIGNAL_LEN*FREQ,18), 5)
+    cpc_model = build_iception_model((SIGNAL_LEN*FREQ,len(LEADS)), NUM_CLASS)
     cpc_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
     # Train the models.
@@ -69,9 +73,75 @@ def train_challenge_model(data_folder, model_folder, verbose):
 
     cpc_model.fit(x = batch_generator(batch_size=BATCH_SIZE, signal_len=SIGNAL_LEN, gen = generate_data(data_folder, filenames,seconds=SIGNAL_LEN)), 
                   epochs=EPOCHS, steps_per_epoch=len(filenames)/BATCH_SIZE, verbose=verbose)
+    
+    cnn_backbone = delete_last_layer(cpc_model, "feature_vector")
+    reccurent_model = lstm_dnn_model()
+    reccurent_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
+    
+    cnn_features = np.zeros((num_patients,72,128))
+    lstm_labels = np.zeros((num_patients,1))
+    patient_features = np.zeros((num_patients,8))
+
+    # Train the models.
+    if verbose >= 1:
+        print('Training the LSTM model on the Challenge data...')
+
+
+    for patient_num, patient_id in enumerate(patient_ids):
+        print("Patient {}".format(patient_num))
+        recording_ids = np.asarray(find_recording_files(data_folder, patient_id))
+        patient_metadata = load_challenge_data(data_folder, patient_id)
+        patient_features[patient_num,:] = get_patient_features(patient_metadata)
+        lstm_labels[patient_num,:] = get_cpc(patient_metadata)
+        cnt = 0
+        for i in range(72):
+            if cnt < len(recording_ids):
+                rec_num = int(recording_ids[cnt].split("_")[-1])
+                if i == rec_num:
+                    try:
+                        temp_recording_data, channels, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_ids[cnt] + "_EEG"))
+                        if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
+                            recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
+                        elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
+                            diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
+                            recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
+                        recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
+                        recording_data = np.moveaxis(recording_data,0,-1)
+                        recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
+                        recording_data = add_and_restructure_eeg_leads(LEADS, channels, recording_data)
+                        recording_data = recording_data[:SIGNAL_LEN*FREQ]
+                    except:
+                        recording_data = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)))
+                    cnt += len(np.where(np.char.endswith(recording_ids,str(rec_num).zfill(3)))[0])
+                else:
+                    recording_data = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)))
+                cnn_features[patient_num,i,:] = cnn_backbone(np.expand_dims(recording_data,0))
+            else:
+                break
+    patient_features = clean_tabular_data(patient_features)
+    reccurent_model.fit(x=[cnn_features,patient_features],y=lstm_labels,batch_size=LSTM_BS,epochs=LSTM_EPOCHS,verbose=verbose)
+
+
+    #mem_incept = tf.keras.models.Sequential()
+    #mem_incept.add(tf.keras.layers.TimeDistributed(cnn_backbone, input_shape=(72, SIGNAL_LEN * FREQ,18)))
+    #mem_incept.add(reccurent_model)
+    #mem_incept.add(coral.CoralOrdinal(num_classes = 5))
+    #mem_incept.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
+    #mem_incept = join_models(cnn_backbone,reccurent_model)
+    mem_incept = join_models_2(cnn_backbone,reccurent_model)
+
+
+
+    #memory_inception = tf.keras.models.Sequential()
+    #memory_inception.add(
+    #tf.keras.layers.TimeDistributed(cnn_backbone, input_shape=(10, SIGNAL_LEN,18)))
+    #memory_inception.add(tf.keras.layers.LSTM(128, activation='relu', return_sequences=True))
+    #memory_inception.add(tf.keras.layers.LSTM(72, activation='relu', return_sequences=False))
+    #memory_inception.add(coral.CoralOrdinal(num_classes = 5))
+    #memory_inception.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = 0.0001), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
     # Save the models.
-    save_challenge_model(model_folder, cpc_model)
+    save_challenge_model(model_folder, mem_incept)
 
     if verbose >= 1:
         print('Done.')
@@ -79,14 +149,21 @@ def train_challenge_model(data_folder, model_folder, verbose):
 # Load your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
 # arguments of this function.
 def load_challenge_models(model_folder, verbose):
+    LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
     SIGNAL_LEN = 300 
     SAMPLE_FREQ = 100 # seconds
-    model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,18), 5)
+    NUM_CLASS = 5
+    cnn_model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,len(LEADS)), NUM_CLASS)
+    cnn_backbone = delete_last_layer(cnn_model, "feature_vector")
+    #reccurent_model = td_lstm_model()
+    reccurent_model = lstm_dnn_model()
+
+    mem_incept = join_models_2(cnn_backbone,reccurent_model)
     filename = os.path.join(model_folder, 'model_weights.h5')
-    model.load_weights(filename)
+    mem_incept.load_weights(filename)
     if verbose >= 1:
         print('Model loaded...')
-    return model
+    return mem_incept
 
 
 # Run your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
@@ -94,41 +171,45 @@ def load_challenge_models(model_folder, verbose):
 def run_challenge_models(models, data_folder, patient_id, verbose):
     SIGNAL_LEN = 300 # sec
     FREQ = 100
+    LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
     # Load data.
     #patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
     patient_metadata = load_challenge_data(data_folder, patient_id)
     recording_ids = find_recording_files(data_folder, patient_id)
+    patient_features = get_patient_features(patient_metadata)
+    patient_features = np.nan_to_num(patient_features, nan=0)
 
-    #patient_ids = find_data_folders(data_folder)
-    patient_pred = []
-    for recording_id in recording_ids:
-        try:
-            temp_recording_data, _, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_id + "_EEG"))
-            if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
-                recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
-            elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
-                diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
-                recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
-            recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
-            recording_data = np.moveaxis(recording_data,0,-1)
-            recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
-            recording_data = recording_data[:SIGNAL_LEN*FREQ,:18] # stygg hardkoding her
-        except:
-            recording_data = np.zeros((SIGNAL_LEN*FREQ,18))
-        #print(recording_data.shape)
-        current_prediction = models.predict(np.expand_dims(recording_data,0))
-        current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
-        current_outcome_hat_probability = current_prediction[:,3:].sum(axis=1)
-        patient_pred.append(current_outcome_hat_probability)
-    patient_pred = np.asarray(patient_pred)
 
-    outcome_probability = np.nanmean(patient_pred)
-    if np.isnan(outcome_probability) == True:
-        # If all probas = nan --> set = 0.5 +- 0.005
-        outcome_probability = 0.5 + random.random()/100 -0.005
+    recordings = np.zeros((72,SIGNAL_LEN*FREQ,len(LEADS)))
+
+    for rec_num, recording_id in enumerate(recording_ids):
+        hour = int(recording_id.split("_")[-1])
+        if hour > 71:
+            break
+        if np.all(recordings[hour,:,:]) == False:
+            try:
+                temp_recording_data, channels, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_id + "_EEG"))
+                if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
+                    recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
+                elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
+                    diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
+                    recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
+                #recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
+                recording_data = np.moveaxis(recording_data,0,-1)
+                recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
+                recording_data = add_and_restructure_eeg_leads(LEADS, channels, recording_data)
+                recording_data = recording_data[:SIGNAL_LEN*FREQ] 
+                recordings[hour,:,:] = recording_data
+            except:
+                continue
+        else:
+            continue
+
+    current_prediction = models.predict([np.expand_dims(recordings,0),np.expand_dims(patient_features,0)])
+    current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
+    outcome_probability = current_prediction[:,3:].sum(axis=1)
     outcome = int((outcome_probability > 0.5) * 1)
-
-
+    
     cpc = (outcome_probability * 4) + 1
     cpc = np.nan_to_num(cpc, nan=3.0)
 
@@ -150,14 +231,24 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 def cross_validate_model(data_folder, num_folds, verbose):
     # Find data files.
 
-    SIGNAL_LEN = 30000 # samples
+    #SIGNAL_LEN = 30000 # samples
+    #BATCH_SIZE = 20
+    #EPOCHS = 5
+    #LEARNING_RATE = 0.00001
+
+    #BATCH_SIZE_LSTM = 30
+    #EPOCHS_LSTM = 20
+    #LEARNING_RATE_LSTM = 0.0001
+
+    LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
+    SIGNAL_LEN = 300 # sec
+    FREQ = 100
     BATCH_SIZE = 20
     EPOCHS = 5
     LEARNING_RATE = 0.00001
-
-    BATCH_SIZE_LSTM = 30
-    EPOCHS_LSTM = 20
-    LEARNING_RATE_LSTM = 0.0001
+    LSTM_EPOCHS = 50
+    LSTM_BS = 30
+    NUM_CLASS = 5
 
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -201,7 +292,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
 
         # Define the models.
 
-        cpc_model = build_iception_model((SIGNAL_LEN,18), 5)
+        cpc_model = build_iception_model((SIGNAL_LEN*FREQ,len(LEADS)), NUM_CLASS)
         cpc_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
 
@@ -214,37 +305,51 @@ def cross_validate_model(data_folder, num_folds, verbose):
                                               steps_per_epoch=len(train_filenames)/BATCH_SIZE, validation_steps=len(val_filenames)/BATCH_SIZE,validation_freq=1)
 
 
-        cnn_backbone = delete_last_layer(cpc_model)
-
-        cnn_feature_vectors = np.zeros((len(train_ids),72, 128,1))
-        cpc_train = np.zeros((len(train_ids),1))
-
-        for k in range(len(train_ids)):
-            if verbose >= 2:
-                print('    {}/{}...'.format(k+1, len(train_ids)))
-            
-            patient_id = train_ids[j]
-            patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
-            cpc_train[k,:] = get_cpc(patient_metadata)
-            for hour, val_recording in enumerate(recording_data):
-                if val_recording[1] == None:
-                    continue
-                    #cnn_feature_vectors[k,hour,:,0] = np.zeros(128)
-                else:
-                    current_recording = val_recording[0]
-                    current_recording = np.moveaxis(current_recording,0,-1)
-                    current_prediction = cnn_backbone.predict(np.expand_dims(current_recording[:SIGNAL_LEN],0))
-                    cnn_feature_vectors[k,hour,:,0] = current_prediction
-        
-
-  
-
+        cnn_backbone = delete_last_layer(cpc_model, "feature_vector")
         reccurent_model = td_lstm_model()
-        reccurent_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE_LSTM), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
-        
-        reccurent_model.fit(x=cnn_feature_vectors, y=cpc_train, epochs=EPOCHS_LSTM, batch_size=BATCH_SIZE_LSTM)
-        
+        reccurent_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
 
+    
+        cnn_features = np.zeros((num_patients,72,128))
+        lstm_labels = np.zeros((num_patients,1))
+
+        # Train the models.
+        if verbose >= 1:
+            print('Training the LSTM model on the Challenge data...')
+
+
+        for patient_num, patient_id in enumerate(patient_ids):
+            print("Patient {}".format(patient_num))
+            recording_ids = np.asarray(find_recording_files(data_folder, patient_id))
+            patient_metadata = load_challenge_data(data_folder, patient_id)
+            lstm_labels[patient_num,:] = get_cpc(patient_metadata)
+            cnt = 0
+            for i in range(72):
+                if cnt < len(recording_ids):
+                    rec_num = int(recording_ids[cnt].split("_")[-1])
+                    if i == rec_num:
+                        try:
+                            temp_recording_data, channels, sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_ids[cnt] + "_EEG"))
+                            if temp_recording_data.shape[1] > int(SIGNAL_LEN*sampling_frequency):
+                                recording_data = temp_recording_data[:,:int(SIGNAL_LEN*sampling_frequency)]
+                            elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
+                                diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
+                                recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
+                            recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
+                            recording_data = np.moveaxis(recording_data,0,-1)
+                            recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
+                            recording_data = add_and_restructure_eeg_leads(LEADS, channels, recording_data)
+                            recording_data = recording_data[:SIGNAL_LEN*FREQ]
+                        except:
+                            recording_data = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)))
+                        cnt += len(np.where(np.char.endswith(recording_ids,str(rec_num).zfill(3)))[0])
+                    else:
+                        recording_data = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)))
+                    cnn_features[patient_num,i,:] = cnn_backbone(np.expand_dims(recording_data,0))
+                else:
+                    break
+
+        reccurent_model.fit(x=cnn_features,y=lstm_labels,batch_size=LSTM_BS,epochs=LSTM_EPOCHS,verbose=verbose)
 
 
         print('Test model on validation data...')
@@ -416,7 +521,8 @@ def get_valid_filenames_from_patient_ids(data_folder, patient_ids):
 
 def batch_generator(batch_size: int, gen: Generator, signal_len:int):
     FREQ = 100
-    batch_features = np.zeros((batch_size, signal_len*FREQ, 18))
+    LEADS = 22
+    batch_features = np.zeros((batch_size, signal_len*FREQ, LEADS))
     batch_labels = np.zeros((batch_size, 1))
 
     while True:
@@ -428,6 +534,7 @@ def batch_generator(batch_size: int, gen: Generator, signal_len:int):
 def generate_data(folder: str, filenames, seconds):
     FREQ = 100
     SIGNAL_LEN = 300
+    LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
     while True:
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
@@ -435,19 +542,20 @@ def generate_data(folder: str, filenames, seconds):
             #current_outcome = get_outcome(patient_metadata)
             current_cpc = get_cpc(patient_metadata)
             try:
-                temp_recording_data, _, sampling_frequency = load_recording_data(filename)
+                temp_recording_data, channels, sampling_frequency = load_recording_data(filename)
                 if temp_recording_data.shape[1] > int(seconds*sampling_frequency):
                     recording_data = temp_recording_data[:,:int(seconds*sampling_frequency)]
                 elif temp_recording_data.shape[1] <= int(seconds*sampling_frequency):
                     diff = int(seconds*sampling_frequency) - temp_recording_data.shape[1]
                     recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
 
-                recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
                 recording_data = np.moveaxis(recording_data,0,-1)
                 recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
-                recording_data = recording_data[:FREQ*SIGNAL_LEN,:18] # stygg hardkoding her
+                recording_data = add_and_restructure_eeg_leads(LEADS, channels, recording_data)
+                recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
             except:
-                recording_data = np.zeros((FREQ*SIGNAL_LEN,18))
+                recording_data = np.zeros((FREQ*SIGNAL_LEN,len(LEADS)))
             yield recording_data, current_cpc
 
 def map_regression_to_proba(pred):
@@ -514,12 +622,113 @@ def delete_last_layer(model, layer_name):
 )
     return new_model
 
+def join_models(cnn,lstm):
+    inputs = tf.keras.Input(shape=(72,30000,22))
+    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,22))(inputs)
+    out = lstm(x)
+    model = tf.keras.models.Model(inputs=inputs, outputs=out)
+    return model
+
 def td_lstm_model():
     model = tf.keras.models.Sequential()
     model.add(
-        tf.keras.layers.LSTM(128, activation='relu', return_sequences=False)
+        tf.keras.layers.LSTM(128, return_sequences=True)
     )
-    model.add(tf.keras.layers.LSTM(72, activation='relu')
+    model.add(tf.keras.layers.LSTM(72, return_sequences=False)
     )
     model.add(coral.CoralOrdinal(num_classes = 5))
     return model
+
+def demo_net():
+    inputs = tf.keras.Input(shape=(8,))
+    x = tf.keras.layers.Dense(32)(inputs)
+    output_layer = coral.CoralOrdinal(num_classes = 5)(x) 
+    model = tf.keras.models.Model(inputs=inputs, outputs=output_layer)
+    return model
+
+def lstm_dnn_model():
+    inputs_1 = tf.keras.Input(shape=(72,128))
+    inputs_2 = tf.keras.Input(shape=(8,))
+    lstm1 =  tf.keras.layers.LSTM(128, return_sequences=True)(inputs_1)
+    lstm2 = tf.keras.layers.LSTM(72, return_sequences=False)(lstm1)
+    
+    mod1 = tf.keras.models.Model(inputs=inputs_1, outputs=lstm2)
+    
+    dense = tf.keras.layers.Dense(8,name="feature_vector")(inputs_2)
+    
+    mod2 = tf.keras.models.Model(inputs=inputs_2, outputs=dense)
+    combined = tf.keras.layers.concatenate([mod1.output, mod2.output])
+    
+    output = coral.CoralOrdinal(num_classes = 5)(combined)
+    model = tf.keras.models.Model(inputs=[mod1.input, mod2.input], outputs=output)
+    return model
+
+def join_models_2(cnn,lstm):
+    inputs1 = tf.keras.Input(shape=(72,30000,22))
+    inputs2 = tf.keras.Input(shape=(8,))
+    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,22))(inputs1)
+    out = lstm([x,inputs2])
+    model = tf.keras.models.Model(inputs=[inputs1,inputs2], outputs=out)
+    return model
+
+def add_and_restructure_eeg_leads(reference_leads, current_leads, signal):
+    missing_elements = [element for element in reference_leads if element not in current_leads]
+    num_missing = len(missing_elements)
+    
+    new_rows = np.zeros((signal.shape[0], num_missing)) 
+    new_signal = np.hstack((signal, new_rows)) 
+    
+    current_leads.extend(missing_elements)
+    indices = [reference_leads.index(item) for item in current_leads]
+    
+    new_signal = new_signal[:,np.argsort(indices)]
+    
+    return new_signal
+
+def get_patient_features(data):
+    age = get_age(data)
+    sex = get_sex(data)
+    rosc = get_rosc(data)
+    ohca = get_ohca(data)
+    shockable_rhythm = get_shockable_rhythm(data)
+    ttm = get_ttm(data)
+
+    sex_features = np.zeros(2, dtype=int)
+    if sex == 'Female':
+        female = 1
+        male   = 0
+        other  = 0
+    elif sex == 'Male':
+        female = 0
+        male   = 1
+        other  = 0
+    else:
+        female = 0
+        male   = 0
+        other  = 1
+
+    features = np.array((age, female, male, other, rosc, ohca, shockable_rhythm, ttm))
+
+    return features
+
+def nan_to_mean(arr):
+    if arr.all():
+        return np.zeros((len(arr)))
+    else:
+        mean = np.nanmean(arr)
+        return np.nan_to_num(arr,nan=mean)
+
+def nan_to_median(arr):
+    if arr.all():
+        return np.zeros((len(arr)))
+    else:
+        median = np.nanmedian(arr)
+        return np.nan_to_num(arr,nan=median)
+
+def clean_tabular_data(data):
+    data[:,0] = nan_to_mean(data[:,0])
+    data[:,4] = nan_to_mean(data[:,4])
+    data[:,5] = nan_to_median(data[:,5])
+    data[:,6] = nan_to_median(data[:,6])
+    data[:,7] = nan_to_median(data[:,7])
+    return data
