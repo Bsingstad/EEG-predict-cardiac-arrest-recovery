@@ -35,7 +35,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     BATCH_SIZE = 20
     EPOCHS = 7
     LEARNING_RATE = 0.00001
-    LSTM_EPOCHS = 20
+    LSTM_EPOCHS = 50
     LSTM_BS = 20
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
     NUM_CLASS = 5
