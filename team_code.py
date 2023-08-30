@@ -34,7 +34,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     FREQ = 100
     BATCH_SIZE = 20
     EPOCHS = 7
-    LEARNING_RATE = 0.00001
+    LEARNING_RATE = 0.0001
     LSTM_EPOCHS = 50
     LSTM_BS = 20
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
@@ -65,7 +65,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
         print('Building models...')
 
     cpc_model = build_iception_model((SIGNAL_LEN*FREQ,len(LEADS)), NUM_CLASS)
-    cpc_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
+    cpc_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = tf.keras.losses.BinaryCrossentropy(), metrics = [tf.keras.metrics.AUC()])
 
     # Train the models.
     if verbose >= 1:
@@ -76,8 +76,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     
     cnn_backbone = delete_last_layer(cpc_model, "feature_vector")
     reccurent_model = lstm_dnn_model()
-    reccurent_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = coral.OrdinalCrossEntropy(), metrics = [coral.MeanAbsoluteErrorLabels()])
-
+    reccurent_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = tf.keras.losses.BinaryCrossentropy(), metrics = [tf.keras.metrics.AUC()])
     
     cnn_features = np.zeros((num_patients,72,128))
     lstm_labels = np.zeros((num_patients,1))
@@ -93,7 +92,8 @@ def train_challenge_model(data_folder, model_folder, verbose):
         recording_ids = np.asarray(find_recording_files(data_folder, patient_id))
         patient_metadata = load_challenge_data(data_folder, patient_id)
         patient_features[patient_num,:] = get_patient_features(patient_metadata)
-        lstm_labels[patient_num,:] = get_cpc(patient_metadata)
+        #lstm_labels[patient_num,:] = get_cpc(patient_metadata)
+        lstm_labels[patient_num,:] = get_outcome(patient_metadata)
         cnt = 0
         for i in range(72):
             if cnt < len(recording_ids):
@@ -206,15 +206,14 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
             continue
 
     current_prediction = models.predict([np.expand_dims(recordings,0),np.expand_dims(patient_features,0)])
-    current_prediction = np.asarray(coral.ordinal_softmax(current_prediction))
-    outcome_probability = current_prediction[:,3:].sum(axis=1)
+    outcome_probability = current_prediction.ravel()[0]
     outcome = int((outcome_probability > 0.5) * 1)
-    
     cpc = (outcome_probability * 4) + 1
-    cpc = np.nan_to_num(cpc, nan=3.0)
+    #cpc = np.nan_to_num(cpc, nan=3.0)
+
 
     # Ensure that the CPC score is between (or equal to) 1 and 5.
-    cpc = np.clip(cpc, 1, 5)
+    #cpc = np.clip(cpc, 1, 5)
 
     if verbose >= 1:
         print('Prediction on patient N succeeded...')
@@ -245,7 +244,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
     FREQ = 100
     BATCH_SIZE = 20
     EPOCHS = 5
-    LEARNING_RATE = 0.00001
+    LEARNING_RATE = 0.0001
     LSTM_EPOCHS = 50
     LSTM_BS = 30
     NUM_CLASS = 5
@@ -472,8 +471,8 @@ def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr
             input_res = x
 
     gap_layer = tf.keras.layers.GlobalAveragePooling1D(name="feature_vector")(x)     
-    output_layer = coral.CoralOrdinal(num_classes = 5)(gap_layer)
-    #output_layer = tf.keras.layers.Dense(units=nb_classes,activation=outputfunc)(gap_layer)  
+    #output_layer = coral.CoralOrdinal(num_classes = 5)(gap_layer)
+    output_layer = tf.keras.layers.Dense(units=1,activation="sigmoid")(gap_layer)  
     model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
 
     print("Inception model built.")
@@ -539,12 +538,13 @@ def generate_data(folder: str, filenames, seconds):
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
             patient_metadata = load_challenge_data(folder, patient_id)
-            #current_outcome = get_outcome(patient_metadata)
-            current_cpc = get_cpc(patient_metadata)
+            current_outcome = get_outcome(patient_metadata)
+            #current_cpc = get_cpc(patient_metadata)
             try:
                 temp_recording_data, channels, sampling_frequency = load_recording_data(filename)
                 if temp_recording_data.shape[1] > int(seconds*sampling_frequency):
-                    recording_data = temp_recording_data[:,:int(seconds*sampling_frequency)]
+                    start_time = np.random.randint(0,temp_recording_data.shape[1]-(int(seconds*sampling_frequency)+1))
+                    recording_data = temp_recording_data[:,start_time:start_time+int(seconds*sampling_frequency)]
                 elif temp_recording_data.shape[1] <= int(seconds*sampling_frequency):
                     diff = int(seconds*sampling_frequency) - temp_recording_data.shape[1]
                     recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
@@ -553,10 +553,10 @@ def generate_data(folder: str, filenames, seconds):
                 recording_data = np.moveaxis(recording_data,0,-1)
                 recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
                 recording_data = add_and_restructure_eeg_leads(LEADS, channels, recording_data)
-                recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
+                #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
             except:
                 recording_data = np.zeros((FREQ*SIGNAL_LEN,len(LEADS)))
-            yield recording_data, current_cpc
+            yield recording_data, current_outcome
 
 def map_regression_to_proba(pred):
     new_pred = []
@@ -659,7 +659,8 @@ def lstm_dnn_model():
     mod2 = tf.keras.models.Model(inputs=inputs_2, outputs=dense)
     combined = tf.keras.layers.concatenate([mod1.output, mod2.output])
     
-    output = coral.CoralOrdinal(num_classes = 5)(combined)
+    #output = coral.CoralOrdinal(num_classes = 5)(combined)
+    output = tf.keras.layers.Dense(units=1,activation="sigmoid")(combined)  
     model = tf.keras.models.Model(inputs=[mod1.input, mod2.input], outputs=output)
     return model
 
