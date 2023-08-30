@@ -38,6 +38,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     LSTM_EPOCHS = 50
     LSTM_BS = 20
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
+    ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"] 
     NUM_CLASS = 5
     # Find data files.
     if verbose >= 1:
@@ -64,7 +65,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     if verbose >= 1:
         print('Building models...')
 
-    cpc_model = build_iception_model((SIGNAL_LEN*FREQ,len(LEADS)), NUM_CLASS)
+    cpc_model = build_iception_model((SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)), NUM_CLASS)
     cpc_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = tf.keras.losses.BinaryCrossentropy(), metrics = [tf.keras.metrics.AUC()])
 
     # Train the models.
@@ -106,17 +107,35 @@ def train_challenge_model(data_folder, model_folder, verbose):
                         elif temp_recording_data.shape[1] <= int(SIGNAL_LEN*sampling_frequency):
                             diff = int(SIGNAL_LEN*sampling_frequency) - temp_recording_data.shape[1]
                             recording_data = np.pad(temp_recording_data,((0, 0), (0, diff)), mode='constant')
-                        recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
+                        #recording_data = raw_to_bipolar(recording_data[:,:int(SIGNAL_LEN*sampling_frequency)])
                         recording_data = np.moveaxis(recording_data,0,-1)
                         recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
                         recording_data = add_and_restructure_eeg_leads(LEADS, channels, recording_data)
-                        recording_data = recording_data[:SIGNAL_LEN*FREQ]
+                        #recording_data = recording_data[:SIGNAL_LEN*FREQ]
                     except:
                         recording_data = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)))
+                    try:
+                        temp_ECG_recording_data, ecg_channels, ecg_sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_ids[cnt] + "_ECG"))
+                        if temp_ECG_recording_data.shape[1] > int(SIGNAL_LEN*ecg_sampling_frequency):
+                            ecg_recording_data = temp_ECG_recording_data[:,:int(SIGNAL_LEN*ecg_sampling_frequency)]
+                        elif temp_ECG_recording_data.shape[1] <= int(SIGNAL_LEN*ecg_sampling_frequency):
+                            diff = int(SIGNAL_LEN*ecg_sampling_frequency) - temp_ECG_recording_data.shape[1]
+                            ecg_recording_data = np.pad(temp_ECG_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                        #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                        ecg_recording_data = np.moveaxis(ecg_recording_data,0,-1)
+                        ecg_recording_data = scipy.signal.resample(ecg_recording_data, int((FREQ/ecg_sampling_frequency)*ecg_recording_data.shape[0]), axis=0)
+                        ecg_recording_data = add_and_restructure_ecg_leads(ECG_LEADS, ecg_channels, ecg_recording_data)
+                        #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
+                    except:
+                        ecg_recording_data = np.zeros((FREQ*SIGNAL_LEN,5))
+            
+                    combined_recordings =  np.hstack([recording_data,ecg_recording_data])
+                    
                     cnt += len(np.where(np.char.endswith(recording_ids,str(rec_num).zfill(3)))[0])
                 else:
-                    recording_data = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)))
-                cnn_features[patient_num,i,:] = cnn_backbone(np.expand_dims(recording_data,0))
+                    combined_recordings = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)))
+                cnn_features[patient_num,i,:] = cnn_backbone(np.expand_dims(combined_recordings,0))
             else:
                 break
     patient_features = clean_tabular_data(patient_features)
@@ -150,10 +169,11 @@ def train_challenge_model(data_folder, model_folder, verbose):
 # arguments of this function.
 def load_challenge_models(model_folder, verbose):
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
+    ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"] 
     SIGNAL_LEN = 300 
     SAMPLE_FREQ = 100 # seconds
-    NUM_CLASS = 5
-    cnn_model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,len(LEADS)), NUM_CLASS)
+    NUM_CLASS = 1
+    cnn_model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,len(LEADS)+len(ECG_LEADS)), NUM_CLASS)
     cnn_backbone = delete_last_layer(cnn_model, "feature_vector")
     #reccurent_model = td_lstm_model()
     reccurent_model = lstm_dnn_model()
@@ -172,6 +192,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     SIGNAL_LEN = 300 # sec
     FREQ = 100
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
+    ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"] 
     # Load data.
     #patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
     patient_metadata = load_challenge_data(data_folder, patient_id)
@@ -180,7 +201,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     patient_features = np.nan_to_num(patient_features, nan=0)
 
 
-    recordings = np.zeros((72,SIGNAL_LEN*FREQ,len(LEADS)))
+    recordings = np.zeros((72,SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)))
 
     for rec_num, recording_id in enumerate(recording_ids):
         hour = int(recording_id.split("_")[-1])
@@ -198,8 +219,23 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
                 recording_data = np.moveaxis(recording_data,0,-1)
                 recording_data = scipy.signal.resample(recording_data, int((FREQ/sampling_frequency)*recording_data.shape[0]), axis=0)
                 recording_data = add_and_restructure_eeg_leads(LEADS, channels, recording_data)
-                recording_data = recording_data[:SIGNAL_LEN*FREQ] 
-                recordings[hour,:,:] = recording_data
+                #recording_data = recording_data[:SIGNAL_LEN*FREQ] 
+                recordings[hour,:,:len(LEADS)] = recording_data
+            except:
+                continue
+            try:
+                temp_ECG_recording_data, ecg_channels, ecg_sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_id + "_ECG"))
+                if temp_ECG_recording_data.shape[1] > int(SIGNAL_LEN*ecg_sampling_frequency):
+                    ecg_recording_data = temp_ECG_recording_data[:,:int(SIGNAL_LEN*ecg_sampling_frequency)]
+                elif temp_ECG_recording_data.shape[1] <= int(SIGNAL_LEN*ecg_sampling_frequency):
+                    diff = int(SIGNAL_LEN*ecg_sampling_frequency) - temp_ECG_recording_data.shape[1]
+                    ecg_recording_data = np.pad(temp_ECG_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                ecg_recording_data = np.moveaxis(ecg_recording_data,0,-1)
+                ecg_recording_data = scipy.signal.resample(ecg_recording_data, int((FREQ/ecg_sampling_frequency)*ecg_recording_data.shape[0]), axis=0)
+                ecg_recording_data = add_and_restructure_ecg_leads(ECG_LEADS, ecg_channels, ecg_recording_data)
+                recordings[hour,:,len(LEADS):] = ecg_recording_data
             except:
                 continue
         else:
@@ -240,6 +276,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
     #LEARNING_RATE_LSTM = 0.0001
 
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
+    
     SIGNAL_LEN = 300 # sec
     FREQ = 100
     BATCH_SIZE = 20
@@ -521,7 +558,8 @@ def get_valid_filenames_from_patient_ids(data_folder, patient_ids):
 def batch_generator(batch_size: int, gen: Generator, signal_len:int):
     FREQ = 100
     LEADS = 22
-    batch_features = np.zeros((batch_size, signal_len*FREQ, LEADS))
+    ECG_LEADS = 5 
+    batch_features = np.zeros((batch_size, signal_len*FREQ, LEADS + ECG_LEADS))
     batch_labels = np.zeros((batch_size, 1))
 
     while True:
@@ -534,6 +572,7 @@ def generate_data(folder: str, filenames, seconds):
     FREQ = 100
     SIGNAL_LEN = 300
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
+    ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"] 
     while True:
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
@@ -556,7 +595,26 @@ def generate_data(folder: str, filenames, seconds):
                 #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
             except:
                 recording_data = np.zeros((FREQ*SIGNAL_LEN,len(LEADS)))
-            yield recording_data, current_outcome
+            try:
+                ecg_filename = filename[:-7] + "ECG.mat"
+                temp_ECG_recording_data, ecg_channels, ecg_sampling_frequency = load_recording_data(ecg_filename)
+                if temp_ECG_recording_data.shape[1] > int(seconds*ecg_sampling_frequency):
+                    start_time = np.random.randint(0,temp_ECG_recording_data.shape[1]-(int(seconds*ecg_sampling_frequency)+1))
+                    ecg_recording_data = temp_ECG_recording_data[:,start_time:start_time+int(seconds*ecg_sampling_frequency)]
+                elif temp_ECG_recording_data.shape[1] <= int(seconds*ecg_sampling_frequency):
+                    diff = int(seconds*ecg_sampling_frequency) - temp_ECG_recording_data.shape[1]
+                    ecg_recording_data = np.pad(temp_ECG_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                ecg_recording_data = np.moveaxis(ecg_recording_data,0,-1)
+                ecg_recording_data = scipy.signal.resample(ecg_recording_data, int((FREQ/ecg_sampling_frequency)*ecg_recording_data.shape[0]), axis=0)
+                ecg_recording_data = add_and_restructure_ecg_leads(ECG_LEADS, ecg_channels, ecg_recording_data)
+                #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
+            except:
+                ecg_recording_data = np.zeros((FREQ*SIGNAL_LEN,5))
+            
+            combined =  np.hstack([recording_data,ecg_recording_data])
+            yield combined, current_outcome
 
 def map_regression_to_proba(pred):
     new_pred = []
@@ -673,6 +731,20 @@ def join_models_2(cnn,lstm):
     return model
 
 def add_and_restructure_eeg_leads(reference_leads, current_leads, signal):
+    missing_elements = [element for element in reference_leads if element not in current_leads]
+    num_missing = len(missing_elements)
+    
+    new_rows = np.zeros((signal.shape[0], num_missing)) 
+    new_signal = np.hstack((signal, new_rows)) 
+    
+    current_leads.extend(missing_elements)
+    indices = [reference_leads.index(item) for item in current_leads]
+    
+    new_signal = new_signal[:,np.argsort(indices)]
+    
+    return new_signal
+
+def add_and_restructure_ecg_leads(reference_leads, current_leads, signal):
     missing_elements = [element for element in reference_leads if element not in current_leads]
     num_missing = len(missing_elements)
     
