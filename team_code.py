@@ -681,8 +681,8 @@ def delete_last_layer(model, layer_name):
     return new_model
 
 def join_models(cnn,lstm):
-    inputs = tf.keras.Input(shape=(72,30000,22))
-    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,22))(inputs)
+    inputs = tf.keras.Input(shape=(72,30000,27))
+    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,27))(inputs)
     out = lstm(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=out)
     return model
@@ -723,9 +723,9 @@ def lstm_dnn_model():
     return model
 
 def join_models_2(cnn,lstm):
-    inputs1 = tf.keras.Input(shape=(72,30000,22))
+    inputs1 = tf.keras.Input(shape=(72,30000,27))
     inputs2 = tf.keras.Input(shape=(8,))
-    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,22))(inputs1)
+    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,27))(inputs1)
     out = lstm([x,inputs2])
     model = tf.keras.models.Model(inputs=[inputs1,inputs2], outputs=out)
     return model
