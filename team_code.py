@@ -39,7 +39,9 @@ def train_challenge_model(data_folder, model_folder, verbose):
     LSTM_BS = 20
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
     ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"] 
-    NUM_CLASS = 5
+    REF_CHANNELS = ["RAT1", "RAT2", "REF", "C2", "A1", "A2", "BIP1", "BIP2", "BIP3", "BIP4", "Cb2", "M1", "M2", "In1-Ref2", "In1-Ref3"]
+    OTHER_CHANNELS = ["SpO2", "EMG1", "EMG2", "EMG3", "LAT1", "LAT2", "LOC", "ROC", "LEG1", "LEG2"]
+    NUM_CLASS = 1
     # Find data files.
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -65,7 +67,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     if verbose >= 1:
         print('Building models...')
 
-    cpc_model = build_iception_model((SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)), NUM_CLASS)
+    cpc_model = build_iception_model((SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)+len(REF_CHANNELS)+len(OTHER_CHANNELS)), NUM_CLASS)
     cpc_model.compile(optimizer = tf.keras.optimizers.Adam(learning_rate = LEARNING_RATE), loss = tf.keras.losses.BinaryCrossentropy(), metrics = [tf.keras.metrics.AUC()])
 
     # Train the models.
@@ -128,13 +130,44 @@ def train_challenge_model(data_folder, model_folder, verbose):
                         ecg_recording_data = add_and_restructure_ecg_leads(ECG_LEADS, ecg_channels, ecg_recording_data)
                         #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
                     except:
-                        ecg_recording_data = np.zeros((FREQ*SIGNAL_LEN,5))
+                        ecg_recording_data = np.zeros((FREQ*SIGNAL_LEN,len(ECG_LEADS)))
+                    try:
+                        temp_REF_recording_data, ref_channels, ref_sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_ids[cnt] + "_REF"))
+                        if temp_REF_recording_data.shape[1] > int(SIGNAL_LEN*ref_sampling_frequency):
+                            ref_recording_data = temp_REF_recording_data[:,:int(SIGNAL_LEN*ref_sampling_frequency)]
+                        elif temp_REF_recording_data.shape[1] <= int(SIGNAL_LEN*ref_sampling_frequency):
+                            diff = int(SIGNAL_LEN*ref_sampling_frequency) - temp_REF_recording_data.shape[1]
+                            ref_recording_data = np.pad(temp_REF_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                        #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                        ref_recording_data = np.moveaxis(ref_recording_data,0,-1)
+                        ref_recording_data = scipy.signal.resample(ref_recording_data, int((FREQ/ref_sampling_frequency)*ref_recording_data.shape[0]), axis=0)
+                        ref_recording_data = add_and_restructure_ecg_leads(REF_CHANNELS, ref_channels, ref_recording_data)
+                        #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
+                    except:
+                        ref_recording_data = np.zeros((FREQ*SIGNAL_LEN,len(REF_CHANNELS)))
+
+                    try:
+                        temp_OTHER_recording_data, other_channels, other_sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_ids[cnt] + "_OTHER"))
+                        if temp_OTHER_recording_data.shape[1] > int(SIGNAL_LEN*other_sampling_frequency):
+                            other_recording_data = temp_OTHER_recording_data[:,:int(SIGNAL_LEN*other_sampling_frequency)]
+                        elif temp_OTHER_recording_data.shape[1] <= int(SIGNAL_LEN*other_sampling_frequency):
+                            diff = int(SIGNAL_LEN*other_sampling_frequency) - temp_OTHER_recording_data.shape[1]
+                            other_recording_data = np.pad(temp_OTHER_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                        #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                        other_recording_data = np.moveaxis(other_recording_data,0,-1)
+                        other_recording_data = scipy.signal.resample(other_recording_data, int((FREQ/other_sampling_frequency)*other_recording_data.shape[0]), axis=0)
+                        other_recording_data = add_and_restructure_ecg_leads(OTHER_CHANNELS, other_channels, other_recording_data)
+                        #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
+                    except:
+                        other_recording_data = np.zeros((FREQ*SIGNAL_LEN,len(OTHER_CHANNELS)))
             
-                    combined_recordings =  np.hstack([recording_data,ecg_recording_data])
+                    combined_recordings =  np.hstack([recording_data,ecg_recording_data,ref_recording_data, other_recording_data])
                     
                     cnt += len(np.where(np.char.endswith(recording_ids,str(rec_num).zfill(3)))[0])
                 else:
-                    combined_recordings = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)))
+                    combined_recordings = np.zeros((SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)+len(REF_CHANNELS)+len(OTHER_CHANNELS)))
                 cnn_features[patient_num,i,:] = cnn_backbone(np.expand_dims(combined_recordings,0))
             else:
                 break
@@ -170,10 +203,12 @@ def train_challenge_model(data_folder, model_folder, verbose):
 def load_challenge_models(model_folder, verbose):
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
     ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"] 
+    REF_CHANNELS = ["RAT1", "RAT2", "REF", "C2", "A1", "A2", "BIP1", "BIP2", "BIP3", "BIP4", "Cb2", "M1", "M2", "In1-Ref2", "In1-Ref3"]
+    OTHER_CHANNELS = ["SpO2", "EMG1", "EMG2", "EMG3", "LAT1", "LAT2", "LOC", "ROC", "LEG1", "LEG2"]
     SIGNAL_LEN = 300 
     SAMPLE_FREQ = 100 # seconds
     NUM_CLASS = 1
-    cnn_model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,len(LEADS)+len(ECG_LEADS)), NUM_CLASS)
+    cnn_model = build_iception_model((SIGNAL_LEN * SAMPLE_FREQ,len(LEADS)+len(ECG_LEADS)+len(REF_CHANNELS)+len(OTHER_CHANNELS)), NUM_CLASS)
     cnn_backbone = delete_last_layer(cnn_model, "feature_vector")
     #reccurent_model = td_lstm_model()
     reccurent_model = lstm_dnn_model()
@@ -192,7 +227,9 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     SIGNAL_LEN = 300 # sec
     FREQ = 100
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
-    ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"] 
+    ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"]
+    REF_CHANNELS = ["RAT1", "RAT2", "REF", "C2", "A1", "A2", "BIP1", "BIP2", "BIP3", "BIP4", "Cb2", "M1", "M2", "In1-Ref2", "In1-Ref3"]
+    OTHER_CHANNELS = ["SpO2", "EMG1", "EMG2", "EMG3", "LAT1", "LAT2", "LOC", "ROC", "LEG1", "LEG2"]
     # Load data.
     #patient_metadata, recording_metadata, recording_data = load_challenge_data(data_folder, patient_id)
     patient_metadata = load_challenge_data(data_folder, patient_id)
@@ -201,7 +238,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     patient_features = np.nan_to_num(patient_features, nan=0)
 
 
-    recordings = np.zeros((72,SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)))
+    recordings = np.zeros((72,SIGNAL_LEN*FREQ,len(LEADS)+len(ECG_LEADS)+len(REF_CHANNELS)+len(OTHER_CHANNELS)))
 
     for rec_num, recording_id in enumerate(recording_ids):
         hour = int(recording_id.split("_")[-1])
@@ -235,7 +272,38 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
                 ecg_recording_data = np.moveaxis(ecg_recording_data,0,-1)
                 ecg_recording_data = scipy.signal.resample(ecg_recording_data, int((FREQ/ecg_sampling_frequency)*ecg_recording_data.shape[0]), axis=0)
                 ecg_recording_data = add_and_restructure_ecg_leads(ECG_LEADS, ecg_channels, ecg_recording_data)
-                recordings[hour,:,len(LEADS):] = ecg_recording_data
+                recordings[hour,:,len(LEADS):len(LEADS)+len(ECG_LEADS)] = ecg_recording_data
+            except:
+                continue
+            try:
+                temp_REF_recording_data, ref_channels, ref_sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_id + "_REF"))
+                if temp_REF_recording_data.shape[1] > int(SIGNAL_LEN*ref_sampling_frequency):
+                    ref_recording_data = temp_REF_recording_data[:,:int(SIGNAL_LEN*ref_sampling_frequency)]
+                elif temp_REF_recording_data.shape[1] <= int(SIGNAL_LEN*ref_sampling_frequency):
+                    diff = int(SIGNAL_LEN*ref_sampling_frequency) - temp_REF_recording_data.shape[1]
+                    ref_recording_data = np.pad(temp_REF_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                ref_recording_data = np.moveaxis(ref_recording_data,0,-1)
+                ref_recording_data = scipy.signal.resample(ref_recording_data, int((FREQ/ref_sampling_frequency)*ref_recording_data.shape[0]), axis=0)
+                ref_recording_data = add_and_restructure_ecg_leads(REF_CHANNELS, ref_channels, ref_recording_data)
+                recordings[hour,:,len(LEADS)+len(ECG_LEADS):len(LEADS)+len(ECG_LEADS)+len(REF_CHANNELS)] = ref_recording_data
+            except:
+                continue
+
+            try:
+                temp_OTHER_recording_data, other_channels, other_sampling_frequency = load_recording_data(os.path.join(data_folder,patient_id,recording_id + "_OTHER"))
+                if temp_OTHER_recording_data.shape[1] > int(SIGNAL_LEN*other_sampling_frequency):
+                    other_recording_data = temp_OTHER_recording_data[:,:int(SIGNAL_LEN*other_sampling_frequency)]
+                elif temp_OTHER_recording_data.shape[1] <= int(SIGNAL_LEN*other_sampling_frequency):
+                    diff = int(SIGNAL_LEN*other_sampling_frequency) - temp_OTHER_recording_data.shape[1]
+                    other_recording_data = np.pad(temp_OTHER_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                other_recording_data = np.moveaxis(other_recording_data,0,-1)
+                other_recording_data = scipy.signal.resample(other_recording_data, int((FREQ/other_sampling_frequency)*other_recording_data.shape[0]), axis=0)
+                other_recording_data = add_and_restructure_ecg_leads(OTHER_CHANNELS, other_channels, other_recording_data)
+                recordings[hour,:,len(LEADS)+len(ECG_LEADS)+len(REF_CHANNELS):len(LEADS)+len(ECG_LEADS)+len(REF_CHANNELS)+len(OTHER_CHANNELS)] = other_recording_data
             except:
                 continue
         else:
@@ -284,7 +352,7 @@ def cross_validate_model(data_folder, num_folds, verbose):
     LEARNING_RATE = 0.0001
     LSTM_EPOCHS = 50
     LSTM_BS = 30
-    NUM_CLASS = 5
+    NUM_CLASS = 1
 
     if verbose >= 1:
         print('Finding the Challenge data...')
@@ -493,7 +561,7 @@ def _shortcut_layer(input_tensor, out_tensor):
     x = tf.keras.layers.Activation('relu')(x)
     return x
 
-def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr_init = 0.001, kernel_size=40, bottleneck_size=32, nb_filters=32, outputfunc="sigmoid", loss=tf.keras.losses.BinaryCrossentropy()):
+def build_iception_model(input_shape, num_classes, depth=6, use_residual=True, lr_init = 0.001, kernel_size=40, bottleneck_size=32, nb_filters=32, outputfunc="sigmoid", loss=tf.keras.losses.BinaryCrossentropy()):
     input_layer = tf.keras.layers.Input(input_shape)
 
     x = input_layer
@@ -509,7 +577,7 @@ def build_iception_model(input_shape, nb_classes, depth=6, use_residual=True, lr
 
     gap_layer = tf.keras.layers.GlobalAveragePooling1D(name="feature_vector")(x)     
     #output_layer = coral.CoralOrdinal(num_classes = 5)(gap_layer)
-    output_layer = tf.keras.layers.Dense(units=1,activation="sigmoid")(gap_layer)  
+    output_layer = tf.keras.layers.Dense(units=num_classes,activation="sigmoid")(gap_layer)  
     model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
 
     print("Inception model built.")
@@ -573,6 +641,8 @@ def generate_data(folder: str, filenames, seconds):
     SIGNAL_LEN = 300
     LEADS = ["Fp1","Fp2","F7","F8","F3","F4","T3", "T4", "C3","C4","T5","T6","P3","P4","O1","O2","Fz","Cz","Pz","Fpz","Oz","F9"]
     ECG_LEADS = ["ECG", "ECG1", "ECG2", "ECGL", "ECGR"] 
+    REF_CHANNELS = ["RAT1", "RAT2", "REF", "C2", "A1", "A2", "BIP1", "BIP2", "BIP3", "BIP4", "Cb2", "M1", "M2", "In1-Ref2", "In1-Ref3"]
+    OTHER_CHANNELS = ["SpO2", "EMG1", "EMG2", "EMG3", "LAT1", "LAT2", "LOC", "ROC", "LEG1", "LEG2"]
     while True:
         for filename in filenames:
             patient_id = get_patient_id_from_path(filename)
@@ -612,8 +682,41 @@ def generate_data(folder: str, filenames, seconds):
                 #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
             except:
                 ecg_recording_data = np.zeros((FREQ*SIGNAL_LEN,5))
+            try:
+                ref_filename = filename[:-7] + "REF.mat"
+                temp_REF_recording_data, ref_channels, ref_sampling_frequency = load_recording_data(ref_filename)
+                if temp_REF_recording_data.shape[1] > int(SIGNAL_LEN*ref_sampling_frequency):
+                    ref_recording_data = temp_REF_recording_data[:,:int(SIGNAL_LEN*ref_sampling_frequency)]
+                elif temp_REF_recording_data.shape[1] <= int(SIGNAL_LEN*ref_sampling_frequency):
+                    diff = int(SIGNAL_LEN*ref_sampling_frequency) - temp_REF_recording_data.shape[1]
+                    ref_recording_data = np.pad(temp_REF_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                ref_recording_data = np.moveaxis(ref_recording_data,0,-1)
+                ref_recording_data = scipy.signal.resample(ref_recording_data, int((FREQ/ref_sampling_frequency)*ref_recording_data.shape[0]), axis=0)
+                ref_recording_data = add_and_restructure_ecg_leads(REF_CHANNELS, ref_channels, ref_recording_data)
+                #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
+            except:
+                ref_recording_data = np.zeros((FREQ*SIGNAL_LEN,len(REF_CHANNELS)))
+
+            try:
+                other_filename = filename[:-7] + "OTHER.mat"
+                temp_OTHER_recording_data, other_channels, other_sampling_frequency = load_recording_data(other_filename)
+                if temp_OTHER_recording_data.shape[1] > int(SIGNAL_LEN*other_sampling_frequency):
+                    other_recording_data = temp_OTHER_recording_data[:,:int(SIGNAL_LEN*other_sampling_frequency)]
+                elif temp_OTHER_recording_data.shape[1] <= int(SIGNAL_LEN*other_sampling_frequency):
+                    diff = int(SIGNAL_LEN*other_sampling_frequency) - temp_OTHER_recording_data.shape[1]
+                    other_recording_data = np.pad(temp_OTHER_recording_data,((0, 0), (0, diff)), mode='constant')
+
+                #recording_data = raw_to_bipolar(recording_data[:,:int(seconds*sampling_frequency)])
+                other_recording_data = np.moveaxis(other_recording_data,0,-1)
+                other_recording_data = scipy.signal.resample(other_recording_data, int((FREQ/other_sampling_frequency)*other_recording_data.shape[0]), axis=0)
+                other_recording_data = add_and_restructure_ecg_leads(OTHER_CHANNELS, other_channels, other_recording_data)
+                #recording_data = recording_data[:FREQ*SIGNAL_LEN] # make sure that the signal is no longer than it is supposed to be
+            except:
+                other_recording_data = np.zeros((FREQ*SIGNAL_LEN,len(OTHER_CHANNELS)))
             
-            combined =  np.hstack([recording_data,ecg_recording_data])
+            combined =  np.hstack([recording_data,ecg_recording_data,ref_recording_data, other_recording_data])
             yield combined, current_outcome
 
 def map_regression_to_proba(pred):
@@ -681,8 +784,8 @@ def delete_last_layer(model, layer_name):
     return new_model
 
 def join_models(cnn,lstm):
-    inputs = tf.keras.Input(shape=(72,30000,27))
-    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,27))(inputs)
+    inputs = tf.keras.Input(shape=(72,30000,52))
+    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,52))(inputs)
     out = lstm(x)
     model = tf.keras.models.Model(inputs=inputs, outputs=out)
     return model
@@ -723,9 +826,9 @@ def lstm_dnn_model():
     return model
 
 def join_models_2(cnn,lstm):
-    inputs1 = tf.keras.Input(shape=(72,30000,27))
+    inputs1 = tf.keras.Input(shape=(72,30000,52))
     inputs2 = tf.keras.Input(shape=(8,))
-    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,27))(inputs1)
+    x = tf.keras.layers.TimeDistributed(cnn, input_shape=(72, 30000,52))(inputs1)
     out = lstm([x,inputs2])
     model = tf.keras.models.Model(inputs=[inputs1,inputs2], outputs=out)
     return model
