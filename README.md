@@ -1,4 +1,8 @@
 # MemoryInception: Predicting Neurological Recovery from EEG Using Recurrent Inceptions
+This github repository contains the code used to achieve the results reported in [*MemoryInception: Predicting Neurological Recovery from EEG Using Recurrent Inceptions*](https://ieeexplore.ieee.org/document/10363983). 
+Full reference to the original paper :
+
+> B. -J. Singstad, J. Ravn and A. Ranjbar, "MemoryInception: Predicting Neurological Recovery from EEG Using Recurrent Inceptions," 2023 Computing in Cardiology (CinC), Atlanta, GA, USA, 2023, pp. 1-4, doi: 10.22489/CinC.2023.133.
 
 # My notes:
 
