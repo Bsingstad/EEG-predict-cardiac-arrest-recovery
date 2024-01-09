@@ -1,4 +1,4 @@
-# Python example code for the George B. Moody PhysioNet Challenge 2023
+# MemoryInception: Predicting Neurological Recovery from EEG Using Recurrent Inceptions
 
 # My notes:
 
